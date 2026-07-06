@@ -68,8 +68,41 @@ Hard evidence from the capture:
 4. Success signal: after a good post the frameset reloads
    (`apptFrameset.htm`); confirm by re-reading the grid for the patient on the
    target date. Never trust the POST response alone.
+5. Wire-level hint (HAR _5): a successful `bk_p` returned **HTTP 302**, while
+   validation bounces returned **200** with a re-rendered form. Treat 200 as
+   "probably bounced — inspect the re-rendered form for what's missing";
+   treat 302 as "probably accepted — still verify by grid re-read".
 
-## Cancel (mre → mre_p → cancel_p) — the three-step contract
+## Cancel — TWO proven paths
+
+The captures show two distinct, both-working cancel flows. Path B is the more
+reliable automation target: it is keyed on the encounter id (`enc`) — a unique
+appointment identifier — and involves no pixel coordinates and no text-matching.
+
+### Path B (encounter-keyed): resched → resched_p → cancel2_p  (HAR _6, proven twice)
+
+```
+(enc source: the front-desk appointment list — each row's edit link is
+ appt_e.htm?date=…&time=…&enc=<ENC>&prov=… — or the patient chart:
+ plist.htm?rowid=<ROWID>&acct=<ACCT> → encounter list)
+
+1. GET resched.htm?enc=<ENC>          → renders the appointment edit form
+2. GET resched_p.htm?TFORMCOUNT=<N>&Delete=Delete
+      → renders a confirm page. NOTHING DELETED YET.
+3. GET cancel2_p?TFORMCOUNT=<N+1>&CancelReason=<or|pr>&Yes=Yes
+      → THIS deletes the appointment.
+```
+
+Hard evidence (two complete cancels in HAR _6): TFORMCOUNT on `cancel2_p` is
+resched_p's value **+1** (observed 3→4 and 13→14) — different arithmetic from
+the grid path's +2. Do not compute the counter either way: **parse it fresh
+from each rendered form** before posting.
+
+Button semantics on `resched_p`, all observed live: `Delete=Delete` (proceed to
+confirm), `Cancel=Cancel` (exit, no-op), `Submit=Submit` (save edits, no-op for
+deletion). Only the `Delete → cancel2_p Yes` pair removes the appointment.
+
+### Path A (grid-cell): mre → mre_p → cancel_p — the three-step contract
 
 This capture shows the full working cancel, including two aborted attempts —
 which is almost certainly the "cancels don't stick" bug:

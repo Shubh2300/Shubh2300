@@ -111,6 +111,18 @@ then returns `status:"submitted"` with only a "VERIFY" warning. Net effect:
    patient on the target date (the app's scraper already adopted this on
    07-05; the MCP copy must match).
 
+### D6 — Name-order intolerance  (user-reproduced booking blocker, 2026-07-06)
+
+Booking "test patient" fails while "patient test" succeeds: a bare typed name
+is interpreted in one fixed word order, so half of natural staff input misses
+the record ("Patients 1, Test"). Fix: `name_order_variants()` in the graft
+file — comma form stays authoritative, a bare two-token name searches BOTH
+orders, hits are deduped by acct across variants, and two *distinct* matching
+patients returns `ambiguous_name` with candidates instead of guessing.
+Acct-first resolution is untouched and still wins. Wire the same helper into
+all three name entry points (scraper `resolve_patient` fallback, app chat
+lookup, MCP `lookup_patient`) so they can't drift apart.
+
 ## Process-level (applies regardless of the code fixes)
 
 - **P1 — Stale module cache:** the MCP server is long-running and imports the

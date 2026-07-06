@@ -257,6 +257,89 @@ async def _grid_cancel_steps(self, *, grid_frame, acct, date, last_name,
 
 
 # ---------------------------------------------------------------------------
+# D6 — NAME-ORDER TOLERANCE (booking blocker, user-reproduced 2026-07-06):
+# booking "test patient" failed while "patient test" worked, because a bare
+# typed name is interpreted in ONE fixed order (last first). A staff member
+# should be able to type either order. MERGE: module-level helper; call it
+# from every name-search entry point (resolve_patient's name fallback, the
+# app chat agent's patient lookup, and the MCP lookup_patient) so all three
+# stay in lockstep.
+# ---------------------------------------------------------------------------
+
+def name_order_variants(raw: str) -> list[tuple[str, str]]:
+    """Expand a free-typed patient name into (last, first) interpretations.
+
+    Rules (in order):
+      - "Last, First" comma form is authoritative -> exactly one variant.
+      - Bare ONE token -> last-name-only search: (token, "").
+      - Bare TWO tokens "A B" is genuinely ambiguous -> BOTH orders:
+        [(A, B), (B, A)]  e.g. "test patient" -> ("test","patient") AND
+        ("patient","test") — the second is what matches "Patients 1, Test".
+      - THREE+ tokens -> both split points that respect multi-word last names:
+        (all-but-last as last, last token as first) and
+        (first token as first, rest as last), both orders deduped.
+
+    The caller MUST keep resolution fail-closed:
+      - acct-first resolution still wins over any name interpretation
+        (_pick_acct_match unchanged — a unique acct match cannot be vetoed).
+      - Run the search for EACH variant, collect hits, and dedupe the union
+        by acct number. Exactly ONE distinct patient across all variants ->
+        proceed. MORE than one distinct patient -> return
+        {status:"ambiguous_name", candidates:[...]} and stop — never pick a
+        winner between two different real patients on word order.
+    """
+    tokens = [t for t in str(raw or "").replace(",", " , ").split() if t]
+    if not tokens:
+        return []
+    if "," in tokens:
+        i = tokens.index(",")
+        last = " ".join(tokens[:i]).strip()
+        first = " ".join(tokens[i + 1:]).strip()
+        return [(last, first)] if last else []
+    if len(tokens) == 1:
+        return [(tokens[0], "")]
+    if len(tokens) == 2:
+        a, b = tokens
+        return [(a, b), (b, a)]
+    joined_last_head = (" ".join(tokens[:-1]), tokens[-1])   # "Patients 1" + "Test"
+    joined_last_tail = (" ".join(tokens[1:]), tokens[0])     # rest + first-token-as-first
+    out, seen = [], set()
+    for v in (joined_last_head, joined_last_tail,
+              (joined_last_head[1], joined_last_head[0]),
+              (joined_last_tail[1], joined_last_tail[0])):
+        key = (v[0].lower(), v[1].lower())
+        if key not in seen:
+            seen.add(key)
+            out.append(v)
+    return out
+
+
+# MERGE sketch for the name-fallback inside resolve_patient (idiom-matched):
+#
+#     hits_by_acct: dict[str, dict] = {}
+#     for last, first in name_order_variants(raw_name):
+#         for h in await self.search_patient(last, first):
+#             acct_key = str(h.get("acct", "")).strip()
+#             if acct_key:
+#                 hits_by_acct.setdefault(acct_key, h)
+#     if len(hits_by_acct) == 1:
+#         resolved = next(iter(hits_by_acct.values()))   # resolved_by:"name_either_order"
+#     elif len(hits_by_acct) > 1:
+#         return {"status": "ambiguous_name",
+#                 "candidates": [{"acct": a, "name": h.get("patient_name", "")}
+#                                for a, h in hits_by_acct.items()],
+#                 "error": "multiple distinct patients match this name in "
+#                          "either word order — specify 'Last, First' or the "
+#                          "account number; refusing to guess"}
+#
+# Unit cases to add to tests_name_variants.py:
+#   name_order_variants("test patient")   == [("test","patient"), ("patient","test")]
+#   name_order_variants("Patients 1, Test") == [("Patients 1","Test")]
+#   name_order_variants("test patients 1") covers ("patients 1","test")
+#   comma form NEVER expands to the swapped order (it is authoritative).
+
+
+# ---------------------------------------------------------------------------
 # BOOKING (defect D5) — three MERGE points inside the existing book_appointment
 # ---------------------------------------------------------------------------
 #

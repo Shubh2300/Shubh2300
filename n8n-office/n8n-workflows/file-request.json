@@ -1,0 +1,173 @@
+{
+  "name": "File Request",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "file-request/inbound",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-inbound",
+      "name": "Webhook: inbound SMS",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [200, 300],
+      "webhookId": "file-request-inbound"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Normalize the RingCentral webhook (or any caller) into the\n// {from, body, patient_hint} shape that the Python flow expects.\n// Mirrors handle_inbound_file_request() input contract.\nconst payload = items[0].json || {};\n\n// RingCentral inbound-SMS webhook nests the message under body.changes[0].\nlet from = payload.from || '';\nlet body = payload.body || '';\nif (!from || !body) {\n  const change = (((payload.body || {}).changes) || [])[0] || {};\n  const msg = (change.newMessages || [])[0] || change || {};\n  from = msg.from && msg.from.phoneNumber || from;\n  body = msg.subject || msg.text || body;\n}\n\nreturn [{ json: {\n  from: String(from || '').trim(),\n  body: String(body || '').trim(),\n  patient_hint: String(payload.patient_hint || '').trim()\n}}];\n"
+      },
+      "id": "node-normalize",
+      "name": "Normalize payload",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8001/inbound",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-http-route",
+      "name": "POST /inbound (file-request.py)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [660, 300],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 30000,
+      "notes": "Q10: retry once with 30s backoff. On the second failure the next IF node routes to the dead-letter handler."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.ok }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-if-ok",
+      "name": "IF ok?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Happy path: the flow has minted a pending gate token.\n// Hand back a 200 to the inbound webhook so RingCentral doesn't retry,\n// AND surface the approval URL so the next step (staff notification)\n// can include it. Per Q4 the staff approval channel is SMS DM to a\n// designated RingCentral number — wire that as a second HTTP node\n// calling /sms/send on the RC adapter, or call ringcentral_adapter via\n// an Execute Command node.\nconst { token, approval_url, patient, stage } = items[0].json;\nreturn [{ json: {\n  ok: true,\n  stage,\n  token,\n  approval_url,\n  patient_name: (patient && patient.name) || null,\n  staff_notice: `New file request from ${patient && patient.name || 'unknown'}: approve at ${approval_url}`\n}}];\n"
+      },
+      "id": "node-fn-success",
+      "name": "Build staff notice",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1140, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, token: $json.token, approval_url: $json.approval_url }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node-respond-ok",
+      "name": "Respond 200 (ok)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1380, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Dead-letter / unhappy path. Two sub-cases:\n//   1. /inbound returned ok=false (no patient match, no Drive folder,\n//      no files) — recoverable, surface to staff via SMS so a human can\n//      pick up the thread.\n//   2. /inbound itself errored after retry — log + escalate.\n// Q7/Q10: audit row + Q4-style SMS to the on-call staff number.\nconst payload = items[0].json || {};\nconst stage = payload.stage || 'unknown';\nconst reason = payload.reason || payload.message || 'unknown error';\nconst notice = `File request FAILED at stage=${stage}: ${reason}. Check /api/logs in Antigravity dashboard.`;\nreturn [{ json: {\n  ok: false,\n  stage,\n  reason,\n  staff_notice: notice,\n  needs_manual: true\n}}];\n"
+      },
+      "id": "node-fn-deadletter",
+      "name": "Dead-letter (audit + escalate)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1140, 420]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, stage: $json.stage, reason: $json.reason }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node-respond-deadletter",
+      "name": "Respond 200 (dead-letter)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1380, 420],
+      "notes": "Always 200 to the inbound webhook per Q10 — RingCentral disables a subscription after ~9 non-2xx pushes."
+    }
+  ],
+  "connections": {
+    "Webhook: inbound SMS": {
+      "main": [[{ "node": "Normalize payload", "type": "main", "index": 0 }]]
+    },
+    "Normalize payload": {
+      "main": [[{ "node": "POST /inbound (file-request.py)", "type": "main", "index": 0 }]]
+    },
+    "POST /inbound (file-request.py)": {
+      "main": [[{ "node": "IF ok?", "type": "main", "index": 0 }]]
+    },
+    "IF ok?": {
+      "main": [
+        [{ "node": "Build staff notice", "type": "main", "index": 0 }],
+        [{ "node": "Dead-letter (audit + escalate)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build staff notice": {
+      "main": [[{ "node": "Respond 200 (ok)", "type": "main", "index": 0 }]]
+    },
+    "Dead-letter (audit + escalate)": {
+      "main": [[{ "node": "Respond 200 (dead-letter)", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "America/New_York"
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "file-request-v1",
+    "templateCredsSetupCompleted": false,
+    "description": "File Request flow — mirrors python/flows/file-request.py. Inbound SMS → patient lookup → Drive file pick → HTML approval gate → on approve, send Drive link via RingCentral SMS. See locked decisions Q2/Q4/Q5/Q7/Q10 in the synthesis doc.",
+    "credentials_needed": [
+      "GOOGLE_SERVICE_ACCOUNT_JSON (file path, set in .env on the Python side)",
+      "DRIVE_PATIENT_ROOT_FOLDER_ID (Drive folder ID)",
+      "AUDIT_PEPPER (32+ random bytes)",
+      "STAFF_APPROVAL_BASE_URL (https:// URL where the gate is reachable)",
+      "RingCentral JWT (reused from Antigravity ringcentral_sync.py via importlib)"
+    ]
+  },
+  "tags": [
+    { "name": "file-request" },
+    { "name": "phi" },
+    { "name": "approval-gated" }
+  ],
+  "versionId": "1"
+}

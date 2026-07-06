@@ -1,0 +1,120 @@
+# ─── Secrets & Credentials ───────────────────────────────────────────────────
+.env
+.env.*
+*.key
+*.pem
+*.p12
+secrets.json
+service_account.json
+*-service-account.json
+*-credentials.json
+
+# WebEDoctor RPA debug screenshots (transient; may show portal/PHI)
+webedoctor_login_*.png
+
+# Gmail OAuth for the referral-capture bot — credential + token caches (never commit)
+gmail_token.json
+gmail_oauth_client*.json
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+*.egg
+
+# ─── Runtime / Scratch (never commit patient data) ───────────────────────────
+scratch/
+webedoctor_rpa.log
+*.log
+
+# Upcoming schedule snapshot contains patient appointment data (PHI) — never commit
+upcoming_schedule.json
+
+# ─── macOS ───────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# ─── Editor / IDE ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── Node (if ever added) ────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─── Antigravity AI internal ─────────────────────────────────────────────────
+.gemini/
+brain/
+# ===== BEGIN projects-backup safety block (managed — edit outside this block) =====
+# --- Secrets & credentials (NEVER commit — ALL .env* included) ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+service_account*.json
+*serviceaccount*.json
+*client_secret*.json
+*credentials*.json
+gha-creds-*.json
+# --- Known secret-bearing config assets ---
+DevAgentSettings.asset
+DevAgentSettings.asset.meta
+# --- Session / auth state ---
+*_state.json
+*.session
+sis_browser_state.json
+# --- PHI / clinical data ---
+patient_database*.json
+patients_data*.js
+billing_ledger*.json
+calls.json
+followups*.json
+team_tasks*.json
+staff.json
+upcoming_schedule.json
+ar_reports/
+*.backup-*
+# --- Caches / logs / scratch ---
+cache/
+caches/
+logs/
+*.log
+scratch/
+.cache/
+tmp/
+# --- OS / editor cruft ---
+.DS_Store
+*.swp
+.idea/
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+# ===== END projects-backup safety block =====

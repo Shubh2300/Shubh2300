@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Launchd plist for n8n on macOS.
+
+  Install:
+    cp /Users/shubh/n8n-office/com.shubh.n8n.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.shubh.n8n.plist
+
+  Status / logs:
+    launchctl list | grep n8n
+    tail -f /Users/shubh/n8n-office/logs/n8n.out.log
+    tail -f /Users/shubh/n8n-office/logs/n8n.err.log
+
+  Stop / uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.shubh.n8n.plist
+    rm ~/Library/LaunchAgents/com.shubh.n8n.plist
+
+  Notes:
+    - RunAtLoad + KeepAlive => starts on login, restarts if it crashes.
+    - We invoke start_n8n.sh so .env is sourced from one place.
+    - LaunchAgent (per-user), NOT LaunchDaemon — n8n runs as $USER, not root,
+      which keeps file ownership and Keychain access sane.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.shubh.n8n</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/shubh/n8n-office/start_n8n.sh</string>
+        <string>fg</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/shubh/n8n-office</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/shubh/n8n-office/.local/node/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/shubh</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- Don't hammer-restart on a crash loop. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/shubh/n8n-office/logs/n8n.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/shubh/n8n-office/logs/n8n.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

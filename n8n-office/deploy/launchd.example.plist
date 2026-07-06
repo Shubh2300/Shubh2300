@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EXAMPLE launchd plist for the Atlantic back-office assistant web app.
+
+  This runs `python3 -m app.server` under launchd so the app starts on login
+  and restarts if it crashes. It is an EXAMPLE — copy it, adjust the absolute
+  paths / port / env for THIS machine, then install. See README-DEPLOY.md.
+
+  Install (per-user LaunchAgent, runs as $USER — NOT root):
+    cp /Users/shubh/n8n-office/deploy/launchd.example.plist \
+       ~/Library/LaunchAgents/com.atlantic.backoffice.plist
+    launchctl load ~/Library/LaunchAgents/com.atlantic.backoffice.plist
+
+  Status / logs:
+    launchctl list | grep com.atlantic.backoffice
+    tail -f /Users/shubh/n8n-office/app/data/logs/backoffice.out.log
+    tail -f /Users/shubh/n8n-office/app/data/logs/backoffice.err.log
+
+  Stop / uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.atlantic.backoffice.plist
+    rm ~/Library/LaunchAgents/com.atlantic.backoffice.plist
+
+  NOTES / CAUTIONS
+    - LaunchAgent (per-user), NOT a LaunchDaemon: the app handles PHI, so it
+      must run as the human user with normal file ownership — never as root.
+    - ProgramArguments runs a login shell that cd's into the repo and exec's
+      `python3 -m app.server`. The login shell (`bash -lc`) picks up the same
+      PATH the human uses, so `python3` resolves to the interpreter that has
+      FastAPI + uvicorn installed. Verify with:
+        python3 -c "import fastapi, uvicorn; print('ok')"
+      If your app must bind a non-default host/port, set APP_HOST / APP_PORT in
+      .env (config.py reads them) rather than passing CLI flags here. Keep the
+      repo path consistent with README-DEPLOY.md.
+    - Secrets (LLM keys, EMR_ENABLED, SVIGG_*_ALLOWLIST) live in
+      /Users/shubh/n8n-office/.env, which config.py loads on import — do NOT
+      put secrets in this plist (world-readable). Only NON-secret runtime
+      toggles belong in EnvironmentVariables here.
+    - APP_ENV is set to prod so cookies are marked Secure. That REQUIRES the
+      app to be reached over HTTPS (put it behind a TLS reverse proxy — see
+      README-DEPLOY.md). If you run plain http on localhost, set APP_ENV=dev
+      instead or logins will silently fail (Secure cookie dropped over http).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.atlantic.backoffice</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd /Users/shubh/n8n-office &amp;&amp; exec python3 -m app.server</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/shubh/n8n-office</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- NON-secret runtime toggles only. Real secrets come from .env. -->
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/shubh</string>
+        <!-- prod => Secure cookies. Requires HTTPS in front (see README). -->
+        <key>APP_ENV</key>
+        <string>prod</string>
+        <!-- EMR writes stay OFF until you have verified the deployment.
+             Flip to 1 only when go-live is intended (see README warnings). -->
+        <key>EMR_ENABLED</key>
+        <string>0</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- Don't hammer-restart on a crash loop. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/shubh/n8n-office/app/data/logs/backoffice.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/shubh/n8n-office/app/data/logs/backoffice.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

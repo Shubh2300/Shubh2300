@@ -1,0 +1,336 @@
+{
+  "name": "Appointment Flow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "appointment",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0001",
+      "name": "Webhook (inbound appointment request)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [-1180, 0],
+      "webhookId": "appointment-webhook"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Step 1 — VALIDATE payload (mirrors flows.appointment._validate_payload).\n// Required: payload.patient.(name|phone|email) AND payload.requested_window.{start,end}.\n\nconst p = $json.body || $json || {};\nconst patient = (p.patient && typeof p.patient === 'object') ? p.patient : {};\nconst patientId = (patient.name || patient.phone || patient.email || '').toString().trim();\nconst window = (p.requested_window && typeof p.requested_window === 'object') ? p.requested_window : {};\nconst start = (window.start || '').toString().trim();\nconst end = (window.end || '').toString().trim();\n\nconst errors = [];\nif (!patientId) errors.push('payload.patient requires name/phone/email');\nif (!start || !end) errors.push('payload.requested_window must include start AND end');\n\nconst requestId = 'appt-' + Math.random().toString(16).slice(2, 14);\n\nreturn [{\n  json: {\n    request_id: requestId,\n    valid: errors.length === 0,\n    errors,\n    req: {\n      patient_id: patientId,\n      patient_label: patient.name || patientId,\n      patient_phone: patient.phone || (patientId.startsWith('+') ? patientId : null),\n      window_start: start,\n      window_end: end,\n      preferred_slot: p.preferred_slot || null,\n      provider: p.provider || null,\n      reason: p.reason || null,\n      actor: p.actor || 'system:n8n-appointment-flow',\n      appointment_source: p.appointment_source || 'svigg',\n      billing_source: p.billing_source || 'picasso',\n    }\n  }\n}];\n"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0002",
+      "name": "Function: Validate payload",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [-960, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json[\"valid\"]}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0003",
+      "name": "IF: payload valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [-740, 0]
+    },
+    {
+      "parameters": {
+        "command": "=cd /Users/shubh/n8n-office && python3 -c \"import json, sys; sys.path.insert(0, 'python'); from integrations import emr_bridge; out = emr_bridge.lookup_patient({{ JSON.stringify($json.req.patient_id) }}, source='all'); print(json.dumps(out, default=str))\""
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0004",
+      "name": "Exec: lookup_patient (all sources)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [-520, -120]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse lookup_patient stdout and decide if any source matched.\n// Carry forward the original req payload alongside the lookup result.\n\nconst raw = $json.stdout || '{}';\nlet lookup;\ntry {\n  lookup = JSON.parse(raw);\n} catch (e) {\n  lookup = { results: [], error: 'lookup_parse_failed: ' + e.message };\n}\nconst matched = (lookup.results || []).filter(r => r.record).map(r => r.source);\n\n// Pull the validated request back out of the previous Function node so this\n// branch keeps everything downstream nodes need on `$json.req`.\nconst req = $items('Function: Validate payload', 0, 0).json.req;\nconst requestId = $items('Function: Validate payload', 0, 0).json.request_id;\n\nreturn [{\n  json: {\n    request_id: requestId,\n    req,\n    patient_lookup: lookup,\n    patient_matched: matched.length > 0,\n    matched_sources: matched,\n  }\n}];\n"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0005",
+      "name": "Function: Parse lookup result",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [-320, -120]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json[\"patient_matched\"]}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0006",
+      "name": "IF: patient matched?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [-100, -120]
+    },
+    {
+      "parameters": {
+        "command": "=cd /Users/shubh/n8n-office && python3 -c \"import json, sys; sys.path.insert(0, 'python'); from integrations import emr_bridge; out = emr_bridge.check_appointment_book(({{ JSON.stringify($json.req.window_start) }}, {{ JSON.stringify($json.req.window_end) }}), source={{ JSON.stringify($json.req.appointment_source) }}); print(json.dumps(out, default=str))\""
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0007",
+      "name": "Exec: check_appointment_book (Sunnyvig)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [120, -200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Detect conflicts (mirrors flows.appointment._detect_conflicts).\n//   same_patient_in_window: appointment.name matches our patient and falls in window\n//   slot_taken: appointment date equals preferred_slot date\n\nconst raw = $json.stdout || '{}';\nlet book;\ntry { book = JSON.parse(raw); } catch (e) { book = { appointments: [] }; }\nconst appts = book.appointments || [];\n\nconst prev = $items('Function: Parse lookup result', 0, 0).json;\nconst req = prev.req;\nconst lookup = prev.patient_lookup;\n\nconst names = new Set();\nfor (const r of (lookup.results || [])) {\n  const n = ((r.record && r.record.name) || '').toString().trim().toLowerCase();\n  if (n) names.add(n);\n}\nif (req.patient_label) names.add(req.patient_label.trim().toLowerCase());\n\nconst preferred = (req.preferred_slot || '').toString().trim();\nconst preferredDate = preferred.includes('T') ? preferred.split('T')[0] : preferred;\n\nconst conflicts = [];\nfor (const a of appts) {\n  const an = (a.name || '').toString().trim().toLowerCase();\n  let ad = (a.intake_date || '').toString();\n  if (ad.includes('/')) {\n    const [m, d, y] = ad.split('/');\n    if (m && d && y) ad = `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;\n  }\n  if (an && names.has(an)) {\n    conflicts.push({ type: 'same_patient_in_window', appointment: a });\n    continue;\n  }\n  if (preferredDate && ad === preferredDate) {\n    conflicts.push({ type: 'slot_taken', appointment: a });\n  }\n}\n\nreturn [{\n  json: {\n    request_id: prev.request_id,\n    req,\n    patient_lookup: lookup,\n    appointments_in_window: appts,\n    conflicts,\n  }\n}];\n"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0008",
+      "name": "Function: Detect conflicts",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [340, -200]
+    },
+    {
+      "parameters": {
+        "command": "=cd /Users/shubh/n8n-office && python3 -c \"import json, sys; sys.path.insert(0, 'python'); from integrations import emr_bridge; out = emr_bridge.check_billing({{ JSON.stringify($json.req.patient_id) }}, source={{ JSON.stringify($json.req.billing_source) }}); print(json.dumps(out, default=str))\""
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0009",
+      "name": "Exec: check_billing (Picasso)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [560, -200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Merge billing into the running payload, summarize for the staff SMS.\nconst raw = $json.stdout || '{}';\nlet billing;\ntry { billing = JSON.parse(raw); } catch (e) { billing = { ledgers: [] }; }\n\nconst prev = $items('Function: Detect conflicts', 0, 0).json;\n\nlet bSummary = { balance: null, insurance: null, found: false };\nfor (const led of (billing.ledgers || [])) {\n  if (led.found) {\n    bSummary = {\n      balance: led.balance, insurance: led.insurance,\n      status: led.status, source: led.source, found: true,\n    };\n    break;\n  }\n}\n\nreturn [{\n  json: { ...prev, billing, billing_summary: bSummary }\n}];\n"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0010",
+      "name": "Function: Summarize billing",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [780, -200]
+    },
+    {
+      "parameters": {
+        "command": "=cd /Users/shubh/n8n-office && python3 -c \"import json, os, sys; sys.path.insert(0, 'python'); from flows.appointment import _get_audit_log, _stage_reservation, AppointmentRequest; payload = json.loads(os.environ['APPT_REQ_JSON']); req = AppointmentRequest.from_payload(payload); audit = _get_audit_log(); ids = _stage_reservation(req, os.environ['APPT_REQ_ID'], json.loads(os.environ['APPT_CONFLICTS']), json.loads(os.environ['APPT_BILLING']), audit); print(json.dumps({'audit_row_ids': ids}))\"",
+        "environmentVariables": "=APPT_REQ_JSON={{ JSON.stringify({patient: {name: $json.req.patient_label, phone: $json.req.patient_phone}, requested_window: {start: $json.req.window_start, end: $json.req.window_end}, preferred_slot: $json.req.preferred_slot, provider: $json.req.provider, reason: $json.req.reason, actor: $json.req.actor}) }}\nAPPT_REQ_ID={{$json.request_id}}\nAPPT_CONFLICTS={{ JSON.stringify($json.conflicts) }}\nAPPT_BILLING={{ JSON.stringify($json.billing) }}"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0011",
+      "name": "Exec: Stage reservation (audit + Q5 stub)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1000, -200],
+      "notes": "WRITE OPERATION — STUBBED per Q5. Writes a STAGED audit row instead of calling the EMR. Real booking is unlocked behind staff sign-off + a written procedure."
+    },
+    {
+      "parameters": {
+        "functionCode": "// Compose Q4 staff-approval SMS body (mirrors _build_staff_sms_body).\nconst prev = $items('Function: Summarize billing', 0, 0).json;\nconst req = prev.req;\nconst conflicts = prev.conflicts || [];\nconst bs = prev.billing_summary || {};\n\nlet auditIds = [];\ntry { auditIds = (JSON.parse($json.stdout || '{}').audit_row_ids) || []; } catch (e) {}\n\nconst balance = (bs.balance === null || bs.balance === undefined || bs.balance === '') ? '—' : ('$' + bs.balance);\nconst conflictStr = conflicts.length\n  ? `${conflicts.length} (${conflicts.slice(0,3).map(c=>c.type).join(', ')})`\n  : 'none';\nconst reason = (req.reason || '—').slice(0, 120);\n\nconst body = [\n  `[APW] Appointment request ${prev.request_id}`,\n  `Patient: ${req.patient_label}`,\n  `Window: ${req.window_start} -> ${req.window_end}`,\n  `Slot:    ${req.preferred_slot || '—'}`,\n  `Provider: ${req.provider || '—'}`,\n  `Reason:  ${reason}`,\n  `Balance: ${balance}`,\n  `Conflicts: ${conflictStr}`,\n  'Reply YES to confirm, NO to reject, EDIT to staff-handle.',\n].join('\\n');\n\nreturn [{\n  json: {\n    ...prev,\n    audit_row_ids: auditIds,\n    staff_sms_body: body,\n    staff_to: process.env.APPROVAL_STAFF_NUMBER || '',\n    from_did: process.env.CLINIC_SMS_FROM_NUMBER || ''\n  }\n}];\n"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0012",
+      "name": "Function: Compose staff SMS",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1220, -200]
+    },
+    {
+      "parameters": {
+        "command": "=cd /Users/shubh/n8n-office && python3 -c \"import json, os, sys; sys.path.insert(0, 'python'); from integrations import ringcentral_adapter; to = os.environ['STAFF_TO']; body = os.environ['STAFF_BODY']; from_ = os.environ.get('FROM_DID') or None; print(json.dumps(ringcentral_adapter.send_sms(to, body, from_=from_), default=str))\"",
+        "environmentVariables": "=STAFF_TO={{$json.staff_to}}\nSTAFF_BODY={{$json.staff_sms_body}}\nFROM_DID={{$json.from_did}}"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0013",
+      "name": "Exec: send_sms (Q4 staff approval)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1440, -200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Send patient confirmation only if the inbound payload gave us a phone-shaped\n// id (per Q9 boundary — never scrape a phone we weren't explicitly given).\nconst prev = $items('Function: Compose staff SMS', 0, 0).json;\nconst phone = prev.req.patient_phone || '';\nconst looksLikePhone = /^\\+?\\d{10,11}$/.test(phone.replace(/\\D/g, '').padStart(11, ''));\nconst mainLine = process.env.CLINIC_MAIN_LINE || 'the clinic';\nconst body = `This is Atlantic Pain & Wellness. We received your appointment request and a staff member will follow up shortly. For urgent issues, call ${mainLine}. For emergencies, call 911.`;\n\nlet staffMsgId = null;\ntry { staffMsgId = (JSON.parse($json.stdout || '{}').id) || null; } catch (e) {}\n\nreturn [{\n  json: {\n    ...prev,\n    staff_sms_message_id: staffMsgId,\n    should_send_patient_sms: looksLikePhone && !!phone,\n    patient_to: phone,\n    patient_sms_body: body,\n  }\n}];\n"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0014",
+      "name": "Function: Compose patient SMS",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1660, -200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json[\"should_send_patient_sms\"]}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0015",
+      "name": "IF: have patient phone?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1880, -200]
+    },
+    {
+      "parameters": {
+        "command": "=cd /Users/shubh/n8n-office && python3 -c \"import json, os, sys; sys.path.insert(0, 'python'); from integrations import ringcentral_adapter; to = os.environ['PT_TO']; body = os.environ['PT_BODY']; from_ = os.environ.get('FROM_DID') or None; print(json.dumps(ringcentral_adapter.send_sms(to, body, from_=from_), default=str))\"",
+        "environmentVariables": "=PT_TO={{$json.patient_to}}\nPT_BODY={{$json.patient_sms_body}}\nFROM_DID={{$json.from_did}}"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0016",
+      "name": "Exec: send_sms (patient confirmation)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2100, -280]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Build the final response payload: identical shape to flows.appointment.run().\nconst prev = $items('Function: Compose patient SMS', 0, 0).json;\n\nlet patientMsgId = null;\nif ($json && $json.stdout) {\n  try { patientMsgId = (JSON.parse($json.stdout).id) || null; } catch (e) {}\n}\n\nreturn [{\n  json: {\n    request_id: prev.request_id,\n    ok: true,\n    pending_approval: true,\n    reserved: false,\n    patient: prev.patient_lookup,\n    appointments_in_window: prev.appointments_in_window,\n    conflicts: prev.conflicts,\n    billing: prev.billing,\n    staff_sms_message_id: prev.staff_sms_message_id,\n    patient_sms_message_id: patientMsgId,\n    audit_row_ids: prev.audit_row_ids,\n    errors: [],\n  }\n}];\n"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0017",
+      "name": "Function: Build success response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2320, -200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0018",
+      "name": "Respond: success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2540, -200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Validation failure branch — return 400-style payload.\nreturn [{\n  json: {\n    request_id: $json.request_id,\n    ok: false,\n    pending_approval: false,\n    reserved: false,\n    patient: {},\n    appointments_in_window: [],\n    conflicts: [],\n    billing: {},\n    staff_sms_message_id: null,\n    patient_sms_message_id: null,\n    audit_row_ids: [],\n    errors: $json.errors.map(e => 'validation: ' + e),\n  }\n}];\n"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0019",
+      "name": "Function: Validation error response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [-520, 160]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Patient not found — fail closed, do NOT proceed to scheduling.\nconst prev = $items('Function: Parse lookup result', 0, 0).json;\nreturn [{\n  json: {\n    request_id: prev.request_id,\n    ok: false,\n    pending_approval: false,\n    reserved: false,\n    patient: prev.patient_lookup,\n    appointments_in_window: [],\n    conflicts: [],\n    billing: {},\n    staff_sms_message_id: null,\n    patient_sms_message_id: null,\n    audit_row_ids: [],\n    errors: ['patient_not_found: no match for ' + prev.req.patient_id + ' in any source'],\n  }\n}];\n"
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0020",
+      "name": "Function: Patient-not-found response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [120, 40]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "5d8e3a90-1b00-4bb3-8a37-1a8c001e0021",
+      "name": "Respond: error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [340, 100]
+    }
+  ],
+  "connections": {
+    "Webhook (inbound appointment request)": {
+      "main": [[{"node": "Function: Validate payload", "type": "main", "index": 0}]]
+    },
+    "Function: Validate payload": {
+      "main": [[{"node": "IF: payload valid?", "type": "main", "index": 0}]]
+    },
+    "IF: payload valid?": {
+      "main": [
+        [{"node": "Exec: lookup_patient (all sources)", "type": "main", "index": 0}],
+        [{"node": "Function: Validation error response", "type": "main", "index": 0}]
+      ]
+    },
+    "Function: Validation error response": {
+      "main": [[{"node": "Respond: error", "type": "main", "index": 0}]]
+    },
+    "Exec: lookup_patient (all sources)": {
+      "main": [[{"node": "Function: Parse lookup result", "type": "main", "index": 0}]]
+    },
+    "Function: Parse lookup result": {
+      "main": [[{"node": "IF: patient matched?", "type": "main", "index": 0}]]
+    },
+    "IF: patient matched?": {
+      "main": [
+        [{"node": "Exec: check_appointment_book (Sunnyvig)", "type": "main", "index": 0}],
+        [{"node": "Function: Patient-not-found response", "type": "main", "index": 0}]
+      ]
+    },
+    "Function: Patient-not-found response": {
+      "main": [[{"node": "Respond: error", "type": "main", "index": 0}]]
+    },
+    "Exec: check_appointment_book (Sunnyvig)": {
+      "main": [[{"node": "Function: Detect conflicts", "type": "main", "index": 0}]]
+    },
+    "Function: Detect conflicts": {
+      "main": [[{"node": "Exec: check_billing (Picasso)", "type": "main", "index": 0}]]
+    },
+    "Exec: check_billing (Picasso)": {
+      "main": [[{"node": "Function: Summarize billing", "type": "main", "index": 0}]]
+    },
+    "Function: Summarize billing": {
+      "main": [[{"node": "Exec: Stage reservation (audit + Q5 stub)", "type": "main", "index": 0}]]
+    },
+    "Exec: Stage reservation (audit + Q5 stub)": {
+      "main": [[{"node": "Function: Compose staff SMS", "type": "main", "index": 0}]]
+    },
+    "Function: Compose staff SMS": {
+      "main": [[{"node": "Exec: send_sms (Q4 staff approval)", "type": "main", "index": 0}]]
+    },
+    "Exec: send_sms (Q4 staff approval)": {
+      "main": [[{"node": "Function: Compose patient SMS", "type": "main", "index": 0}]]
+    },
+    "Function: Compose patient SMS": {
+      "main": [[{"node": "IF: have patient phone?", "type": "main", "index": 0}]]
+    },
+    "IF: have patient phone?": {
+      "main": [
+        [{"node": "Exec: send_sms (patient confirmation)", "type": "main", "index": 0}],
+        [{"node": "Function: Build success response", "type": "main", "index": 0}]
+      ]
+    },
+    "Exec: send_sms (patient confirmation)": {
+      "main": [[{"node": "Function: Build success response", "type": "main", "index": 0}]]
+    },
+    "Function: Build success response": {
+      "main": [[{"node": "Respond: success", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "versionId": "1",
+  "id": "appointment-flow-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "notes": "Mirrors python/flows/appointment.py. Env vars required at runtime: AUDIT_LOG_PEPPER, APPROVAL_STAFF_NUMBER, CLINIC_SMS_FROM_NUMBER (opt), CLINIC_MAIN_LINE. The Stage Reservation node is a STUB per Q5 — it writes an audit row instead of calling the EMR. Q10 retry: configure on each Exec node (Settings > Retry On Fail: 1 retry, 30s)."
+  },
+  "tags": [
+    {"name": "appointment"},
+    {"name": "phi"},
+    {"name": "read-mostly"}
+  ]
+}

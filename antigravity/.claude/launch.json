@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "antigravity-api",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["server.py"],
+      "port": 8000
+    },
+    {
+      "name": "backoffice-app",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/shubh/n8n-office && EMR_ENABLED=0 python3 -m app.server --port 8791"],
+      "port": 8791
+    },
+    {
+      "name": "hub-mock",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/shubh/Downloads/ai-phone-intake-main && exec ./run_mock.sh"],
+      "port": 8011
+    }
+  ]
+}

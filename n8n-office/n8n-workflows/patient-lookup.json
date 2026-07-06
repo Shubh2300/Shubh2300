@@ -1,0 +1,408 @@
+{
+  "name": "Patient Lookup (flow #1)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "patient-lookup",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-001-trigger",
+      "name": "Webhook (chatbot/triage)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        -40,
+        300
+      ],
+      "webhookId": "patient-lookup"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Normalize the inbound payload before fan-out.\n// Mirrors flows/patient-lookup.py::_normalize_key — kept in sync by hand.\nconst body = ($json.body || $json) || {};\nconst phoneDigits = String(body.phone || '').replace(/\\D+/g, '');\nconst email = String(body.email || '').trim().toLowerCase();\nconst name  = String(body.name  || '').trim();\nlet lookupKey = '';\nif (phoneDigits) lookupKey = phoneDigits;\nelse if (email)  lookupKey = email;\nelse             lookupKey = name;\n\nreturn [{ json: {\n  payload: {\n    name:  name  || null,\n    phone: phoneDigits || null,\n    email: email || null,\n    dob:   body.dob || null,\n    intent: body.intent || 'lookup',\n  },\n  lookupKey,\n  hasKey: Boolean(lookupKey),\n  sources: ['svigg','sis','drive'],\n  actor: body.actor || 'n8n-flow:patient-lookup',\n} }];"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-002-norm",
+      "name": "Normalize payload",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json[\"hasKey\"]}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-003-haskey",
+      "name": "IF has lookup key",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Reject — chatbot must collect a name/phone/email first.\nreturn [{ json: { ok: false, error: 'no lookup key (need name, phone, or email)' } }];"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-004-rejectkey",
+      "name": "Reject: no key",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        620,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://127.0.0.1:8011/lookup",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.payload }}",
+        "options": {
+          "timeout": 8000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true
+            }
+          }
+        },
+        "method": "POST"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-005-fastapi",
+      "name": "HTTP: FastAPI /lookup (parallel inside)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        620,
+        180
+      ],
+      "notes": "Calls the local FastAPI app served by flows/patient-lookup.py. That endpoint fans out to Svigg + SIS + Drive in parallel via emr_bridge.lookup_patient() and merges. Falls back to the Execute Command node if the FastAPI process is not running."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json && $json.ok === true}}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-006-ifapi",
+      "name": "IF FastAPI healthy",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        840,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=python3 /Users/shubh/n8n-office/python/flows/patient-lookup.py {{JSON.stringify($('Normalize payload').first().json.payload)}}"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-007-cli",
+      "name": "Fallback: CLI subprocess",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1060,
+        320
+      ],
+      "notes": "Invokes the same module as a CLI. Same result shape — used only when the FastAPI app is down."
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse stdout of the CLI fallback into the same shape FastAPI returned.\nconst raw = ($json.stdout || '').trim();\nif (!raw) {\n  return [{ json: { ok: false, error: 'CLI returned empty stdout', stderr: $json.stderr || '' } }];\n}\ntry {\n  const parsed = JSON.parse(raw);\n  return [{ json: parsed }];\n} catch (e) {\n  return [{ json: { ok: false, error: 'CLI stdout not JSON', detail: String(e), raw } }];\n}"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-008-parsecli",
+      "name": "Parse CLI stdout",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1280,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Branch on decision.status -> existing / new / ambiguous / error.\nconst r = $json;\nconst status = (r && r.decision && r.decision.status) || 'error';\nreturn [{ json: { ...r, _route: status } }];"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-009-tag",
+      "name": "Tag route",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{$json[\"_route\"]}}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "existing",
+              "output": 0
+            },
+            {
+              "value2": "new",
+              "output": 1
+            },
+            {
+              "value2": "ambiguous",
+              "output": 2
+            },
+            {
+              "value2": "error",
+              "output": 3
+            }
+          ]
+        },
+        "fallbackOutput": 3
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-010-switch",
+      "name": "Switch on decision",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        1720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// EXISTING patient: hand decision.merged_record downstream (Appointment / FileRequest flow).\nreturn [{ json: {\n  status: 'existing',\n  patient: $json.decision.merged_record,\n  source:  $json.decision.winning_source,\n  confidence: $json.decision.confidence,\n  audit_row_id: $json.audit_row_id || null,\n} }];"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-011-existing",
+      "name": "Existing -> downstream flow",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1940,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// NEW patient: kick off intake flow (collect DOB, address, insurance).\nreturn [{ json: {\n  status: 'new',\n  lookupKey: $('Normalize payload').first().json.lookupKey,\n  next: 'intake-collect',\n  audit_row_id: $json.audit_row_id || null,\n} }];"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-012-new",
+      "name": "New -> intake flow",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1940,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// AMBIGUOUS: hand off to Q4 SMS approval gate so staff disambiguates.\nreturn [{ json: {\n  status: 'ambiguous',\n  candidates: $json.decision.candidates || [],\n  needs_staff_confirmation: true,\n  audit_row_id: $json.audit_row_id || null,\n} }];"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-013-ambig",
+      "name": "Ambiguous -> SMS approval",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1940,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// ERROR / dead-letter (Q10): write audit row + SMS on-call staff.\n// The Python module already logged the failure; this node is the n8n-side\n// escalation path. Wire to the dead-letter SMS workflow when it lands.\nreturn [{ json: {\n  status: 'error',\n  sources: ($json.sources || []).map(s => ({ source: s.source, error: s.error })),\n  session_expired: ($json.decision && $json.decision.session_expired) || [],\n  needs_oncall_sms: true,\n  audit_row_id: $json.audit_row_id || null,\n} }];"
+      },
+      "id": "9c2c1b1e-2d11-4a02-9b6e-014-err",
+      "name": "Error -> dead-letter",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1940,
+        450
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook (chatbot/triage)": {
+      "main": [
+        [
+          {
+            "node": "Normalize payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize payload": {
+      "main": [
+        [
+          {
+            "node": "IF has lookup key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF has lookup key": {
+      "main": [
+        [
+          {
+            "node": "HTTP: FastAPI /lookup (parallel inside)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject: no key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: FastAPI /lookup (parallel inside)": {
+      "main": [
+        [
+          {
+            "node": "IF FastAPI healthy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF FastAPI healthy": {
+      "main": [
+        [
+          {
+            "node": "Tag route",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fallback: CLI subprocess",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback: CLI subprocess": {
+      "main": [
+        [
+          {
+            "node": "Parse CLI stdout",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse CLI stdout": {
+      "main": [
+        [
+          {
+            "node": "Tag route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag route": {
+      "main": [
+        [
+          {
+            "node": "Switch on decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch on decision": {
+      "main": [
+        [
+          {
+            "node": "Existing -> downstream flow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "New -> intake flow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ambiguous -> SMS approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error -> dead-letter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "1.0.0",
+  "triggerCount": 1,
+  "tags": [
+    {
+      "name": "phi"
+    },
+    {
+      "name": "patient-lookup"
+    },
+    {
+      "name": "v1"
+    }
+  ],
+  "active": false,
+  "meta": {
+    "notes": "Flow #1 per Q2 (locked). Patient identity substrate for every downstream flow (Appointment, File Request, General Message). Read-only per Q5. SMS escalation on ambiguous/error per Q4 + Q10. Audit via integrations/audit_log.py per Q7."
+  }
+}

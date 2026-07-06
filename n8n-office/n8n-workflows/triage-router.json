@@ -1,0 +1,333 @@
+{
+  "name": "Triage Router — SMS Front Door",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sms",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true,
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "node-webhook",
+      "name": "RC SMS Webhook (POST /sms)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 320],
+      "webhookId": "triage-router-sms"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Verify the RingCentral webhook delivery.\n//\n// Two modes we must handle:\n//   1. Validation handshake — RC POSTs with a `Validation-Token` header\n//      and an empty body. We must echo the token back within 5s or the\n//      subscription is rejected.\n//   2. Signed delivery — when the subscription was created with a\n//      `verificationToken`, RC echoes it in `Verification-Token` on every push.\n//      Compare constant-time against the env value.\n//\n// This mirrors `ringcentral_adapter.verify_webhook` in\n// /Users/shubh/n8n-office/python/integrations/ringcentral_adapter.py.\n// If you change the Python logic, change this in lockstep.\n\nconst headers = $input.first().json.headers || {};\n\nfunction getHeader(name) {\n  const target = name.toLowerCase();\n  for (const k of Object.keys(headers)) {\n    if (k.toLowerCase() === target) return headers[k];\n  }\n  return undefined;\n}\n\n// TODO: WIRE CREDS - RC_WEBHOOK_VERIFICATION_TOKEN\n//   Set in n8n env (Settings → Variables) or the n8n process env. Must match\n//   the token passed to ringcentral_adapter.subscribe_sms_webhook(...).\nconst expected = $env.RC_WEBHOOK_VERIFICATION_TOKEN || '';\n\nconst validationToken = getHeader('Validation-Token');\nif (validationToken) {\n  return [{\n    json: {\n      _verify: {\n        ok: true,\n        mode: 'validation',\n        validation_token: validationToken,\n        reason: 'handshake'\n      },\n      _payload: {},\n      _from: '',\n      _to: '',\n      _text: ''\n    }\n  }];\n}\n\nconst presented = getHeader('Verification-Token') || '';\nlet ok = true;\nlet reason = 'no expected token configured; delivery accepted unverified';\nif (expected) {\n  // Constant-time-ish comparison: same length + char-by-char XOR.\n  if (presented.length !== expected.length) {\n    ok = false;\n    reason = 'verification token length mismatch';\n  } else {\n    let diff = 0;\n    for (let i = 0; i < presented.length; i++) {\n      diff |= presented.charCodeAt(i) ^ expected.charCodeAt(i);\n    }\n    if (diff !== 0) {\n      ok = false;\n      reason = 'verification token mismatched';\n    } else {\n      reason = 'verification token matched';\n    }\n  }\n}\n\n// Pull through the JSON body (n8n parses it for us when Content-Type is JSON).\nconst body = $input.first().json.body || {};\n\nreturn [{\n  json: {\n    _verify: { ok, mode: 'delivery', validation_token: null, reason },\n    _payload: body\n  }\n}];\n"
+      },
+      "id": "node-verify",
+      "name": "Verify RC Webhook",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [460, 320]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json._verify.mode === 'validation' }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-if-validation",
+      "name": "Is validation handshake?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 320]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json._verify.validation_token }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Validation-Token",
+                "value": "={{ $json._verify.validation_token }}"
+              }
+            ]
+          },
+          "responseCode": 200
+        }
+      },
+      "id": "node-respond-validation",
+      "name": "Echo Validation-Token (200)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json._verify.ok }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-if-verified",
+      "name": "Verified?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [900, 440]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract (from_number, to_number, text, message_id) from either:\n//   1. A direct test payload  ({ from, to, text })\n//   2. The RC lightweight envelope  ({ body: { from, to, subject, id } })\n//   3. The RC full envelope  ({ body: { changes: [ { newMessages: [...] } ] } })\n// Mirrors `extract_sms_fields()` in triage-router.py — keep in lockstep.\n\nconst payload = $json._payload || {};\nlet from = '';\nlet to = '';\nlet text = '';\nlet messageId = '';\n\n// Shape 1.\nif (payload.from || payload.to || payload.text || payload.body) {\n  from = String(payload.from || '');\n  to = String(payload.to || '');\n  text = String(payload.text || payload.body || '');\n  messageId = String(payload.id || '');\n}\n\n// Shape 2/3 — nested under `body`.\nconst b = (payload.body && typeof payload.body === 'object') ? payload.body : null;\nif (b) {\n  if (b.subject && !text) text = String(b.subject);\n  if (b.from && b.from.phoneNumber && !from) from = String(b.from.phoneNumber);\n  if (Array.isArray(b.to) && b.to.length && !to) to = String(b.to[0].phoneNumber || '');\n  if (b.id && !messageId) messageId = String(b.id);\n\n  if (Array.isArray(b.changes)) {\n    for (const ch of b.changes) {\n      if (!ch || !Array.isArray(ch.newMessages) || !ch.newMessages.length) continue;\n      const m = ch.newMessages[0] || {};\n      if (!text && m.subject) text = String(m.subject);\n      if (!from && m.from && m.from.phoneNumber) from = String(m.from.phoneNumber);\n      if (!to && Array.isArray(m.to) && m.to.length) to = String(m.to[0].phoneNumber || '');\n      if (!messageId && m.id) messageId = String(m.id);\n      break;\n    }\n  }\n}\n\nreturn [{\n  json: {\n    _verify: $json._verify,\n    _payload: payload,\n    sms: {\n      from_number: from,\n      to_number: to,\n      text,\n      message_id: messageId\n    }\n  }\n}];\n"
+      },
+      "id": "node-extract",
+      "name": "Extract SMS fields",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1140, 360]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.ANTHROPIC_API_KEY }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"{{ $env.TRIAGE_MODEL || 'claude-haiku-4-5' }}\",\n  \"max_tokens\": 200,\n  \"system\": \"You are the triage classifier for Atlantic Pain & Wellness's SMS front door. Read the patient's inbound SMS and return ONLY a JSON object with these exact fields: {\\\"intent\\\": <one of: appointment, file_request, patient_lookup, general_message>, \\\"secondary\\\": [<zero or more of the same labels>], \\\"confidence\\\": <\\\"high\\\"|\\\"medium\\\"|\\\"low\\\">, \\\"reason\\\": <one short sentence, no PHI>}. Definitions: appointment = schedule, reschedule, cancel, confirm a visit; file_request = patient asks for records, imaging, notes, forms; patient_lookup = patient asks 'who is my doctor', 'do you have me on file', 'is my insurance in network', identity/account questions; general_message = anything else, including clinical questions, complaints, thank-yous, and unrecognized requests. Pick general_message when in doubt. Do NOT diagnose, advise, or address clinical content. Return JSON only, no markdown fences.\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify(($json.sms.text || '').slice(0, 4000)) }}\n    }\n  ]\n}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-claude",
+      "name": "Claude Haiku — Classify Intent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1360, 360],
+      "notes": "TODO: WIRE CREDS - ANTHROPIC_API_KEY (set in n8n env vars). Per Q3 + Q11: a signed Anthropic BAA must be in place before pointing this at real PHI. Retry once with 30s backoff per Q10 — configured on the node's Settings tab."
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse Claude's reply, coerce unknown labels to general_message, attach to\n// the running item. Mirrors `_safe_parse_intent` + the dispatcher coercion\n// guard in triage-router.py — keep in lockstep.\n\nconst VALID = ['appointment', 'file_request', 'patient_lookup', 'general_message'];\nconst FALLBACK = 'general_message';\n\nconst upstream = $input.first().json;\n\n// HTTP Request node with neverError=true gives us either the parsed JSON body\n// or, on error, the error envelope. Detect both.\nlet apiBody = upstream;\nif (upstream && upstream.body && typeof upstream.body === 'object') {\n  apiBody = upstream.body;\n}\n\nlet classifierText = '';\nif (apiBody && Array.isArray(apiBody.content)) {\n  for (const block of apiBody.content) {\n    if (block && block.type === 'text') { classifierText = block.text || ''; break; }\n  }\n}\n\nfunction safeParse(text) {\n  let raw = (text || '').trim();\n  if (raw.startsWith('```')) {\n    raw = raw.replace(/^```(?:json)?\\s*/i, '').replace(/```\\s*$/, '').trim();\n  }\n  try {\n    const obj = JSON.parse(raw);\n    if (obj && typeof obj === 'object') return obj;\n  } catch (_) { /* fall through */ }\n  return { intent: FALLBACK, secondary: [], confidence: 'low', reason: 'classifier returned non-JSON' };\n}\n\nconst parsed = safeParse(classifierText);\nlet intent = String(parsed.intent || '').toLowerCase();\nif (!VALID.includes(intent)) {\n  intent = FALLBACK;\n}\n\nconst classification = {\n  intent,\n  secondary: Array.isArray(parsed.secondary) ? parsed.secondary : [],\n  confidence: parsed.confidence || 'medium',\n  reason: parsed.reason || ''\n};\n\n// Pull the SMS fields back through. We have to look them up via the upstream\n// item rather than $json because the HTTP Request node replaced our payload\n// with the API response. Use $items() on the Extract node.\nconst extracted = $items('Extract SMS fields', 0, 0)[0].json;\n\nreturn [{\n  json: {\n    _verify: extracted._verify,\n    sms: extracted.sms,\n    classification,\n    classifier_raw: classifierText\n  }\n}];\n"
+      },
+      "id": "node-parse-intent",
+      "name": "Parse classifier reply",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1580, 360]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.classification.intent }}",
+        "rules": {
+          "rules": [
+            { "value2": "appointment" },
+            { "value2": "file_request" },
+            { "value2": "patient_lookup" },
+            { "value2": "general_message" }
+          ]
+        },
+        "fallbackOutput": 3
+      },
+      "id": "node-switch-intent",
+      "name": "Dispatch by intent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1800, 360]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Stub handler for `appointment`. Real implementation ships per Q2 (last —\n// requires SIS write access + Q5 sign-off procedure). For now, queue for staff.\nreturn [{ json: { handled: false, intent: 'appointment', note: 'queued for staff (handler not yet wired)', sms: $json.sms, classification: $json.classification, _verify: $json._verify } }];\n"
+      },
+      "id": "node-handler-appt",
+      "name": "Handler: appointment (stub)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2020, 120]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Stub handler for `file_request`. Real implementation ships per Q2 (second —\n// Drive read + Q4 SMS approval gate). For now, queue for staff.\nreturn [{ json: { handled: false, intent: 'file_request', note: 'queued for staff (handler not yet wired)', sms: $json.sms, classification: $json.classification, _verify: $json._verify } }];\n"
+      },
+      "id": "node-handler-file",
+      "name": "Handler: file_request (stub)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2020, 280]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Stub handler for `patient_lookup`. Real implementation is in the sibling\n// flow at /Users/shubh/n8n-office/python/flows/patient-lookup.py (Q2: ships\n// first because it's the substrate every other flow needs). When that flow\n// gets its own HTTP endpoint, replace this Function with an HTTP Request.\nreturn [{ json: { handled: false, intent: 'patient_lookup', note: 'queued for staff (handler not yet wired in n8n; Python sibling exists)', sms: $json.sms, classification: $json.classification, _verify: $json._verify } }];\n"
+      },
+      "id": "node-handler-lookup",
+      "name": "Handler: patient_lookup (stub)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2020, 440]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Stub handler for `general_message`. Per Q9 — patient gets the generic\n// clinic ack; staff handles the actual response.\nreturn [{ json: { handled: false, intent: 'general_message', note: 'queued for staff (general)', sms: $json.sms, classification: $json.classification, _verify: $json._verify } }];\n"
+      },
+      "id": "node-handler-general",
+      "name": "Handler: general_message (stub)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2020, 600]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Audit log writer. Per Q7, audit lives in SQLite via audit_log.py — NOT\n// n8n's built-in execution log. The cleanest way to call audit_log.py from\n// here is to invoke it as a subprocess via the Execute Command node. We use\n// a Function node to BUILD the command + args, then hand off to the next\n// node. This keeps secrets out of node parameters (the pepper is read from\n// AUDIT_LOG_PEPPER env inside the Python subprocess, not interpolated here).\n//\n// Schema mirrors AuditLog.log(...) in audit_log.py exactly.\n\nconst sms = $json.sms || {};\nconst cls = $json.classification || {};\nconst handler = $json.handled !== undefined ? $json : { handled: false };\nconst verify = $json._verify || { ok: true };\n\nconst actor = sms.from_number || 'unknown_sms_sender';\nconst action = verify.ok ? 'SMS_INBOUND' : 'WEBHOOK_REJECT';\nconst resultSummary = verify.ok\n  ? `intent=${cls.intent || 'unknown'} conf=${cls.confidence || '?'} handled=${Boolean(handler.handled)}`\n  : `verification_failed`;\nconst errorMsg = verify.ok ? null : (verify.reason || 'unknown');\n\nconst auditPayload = {\n  actor,\n  intent: 'triage-classify',\n  action,\n  result_summary: resultSummary,\n  patient_id: actor || null,\n  error_msg: errorMsg\n};\n\n// Pass the original handler output through unchanged for the final Respond node.\nreturn [{\n  json: {\n    audit: auditPayload,\n    audit_cmd: 'python3',\n    audit_args: [\n      '-c',\n      `import json, os, sys; sys.path.insert(0, '/Users/shubh/n8n-office/python'); from integrations.audit_log import AuditLog; a = AuditLog(os.environ.get('AUDIT_LOG_PATH', '/Users/shubh/n8n-office/cache/audit_log.sqlite'), pepper=os.environ['AUDIT_LOG_PEPPER']); p = json.loads(sys.stdin.read()); a.log(**p); print('ok')`\n    ],\n    audit_stdin: JSON.stringify(auditPayload),\n    response: {\n      ok: true,\n      intent: cls.intent || 'general_message',\n      confidence: cls.confidence,\n      secondary: cls.secondary || [],\n      reason: cls.reason,\n      handler: { handled: Boolean(handler.handled), note: handler.note || '' },\n      ack_template: \"This is Atlantic Pain & Wellness. We received your message and a staff member will follow up. For urgent issues, call our main line. For emergencies, call 911.\"\n    }\n  }\n}];\n"
+      },
+      "id": "node-build-audit",
+      "name": "Build audit row",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [2260, 360]
+    },
+    {
+      "parameters": {
+        "command": "={{ $json.audit_cmd }} {{ $json.audit_args.map(a => \"'\" + a.replace(/'/g, \"'\\\\''\") + \"'\").join(' ') }} <<< {{ JSON.stringify($json.audit_stdin) }}"
+      },
+      "id": "node-write-audit",
+      "name": "Append to audit_log (SQLite)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2480, 360],
+      "notes": "TODO: WIRE CREDS - AUDIT_LOG_PEPPER (per-install secret; min 32 random bytes; back up alongside FileVault recovery key). Optional: AUDIT_LOG_PATH (defaults to /Users/shubh/n8n-office/cache/audit_log.sqlite). The Python one-liner imports integrations.audit_log and appends a single hash-chained row — same code path the FastAPI router uses."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.response }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node-respond-200",
+      "name": "Respond 200 (always)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2700, 360]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Verification failed branch — still 200 per Q10 so RC doesn't retry-then-\n// disable. Build a minimal audit payload (no classification happened) and\n// hand to the same audit writer chain.\nconst payload = $items('Extract SMS fields', 0, 0)[0]?.json || $json;\nconst sms = payload.sms || { from_number: '' };\nconst verify = payload._verify || $json._verify || { ok: false, reason: 'unknown' };\n\nconst actor = sms.from_number || 'unknown_sms_sender';\nconst auditPayload = {\n  actor,\n  intent: 'triage-classify',\n  action: 'WEBHOOK_REJECT',\n  result_summary: 'verification_failed',\n  patient_id: actor || null,\n  error_msg: verify.reason || 'unknown'\n};\n\nreturn [{\n  json: {\n    audit: auditPayload,\n    audit_cmd: 'python3',\n    audit_args: [\n      '-c',\n      `import json, os, sys; sys.path.insert(0, '/Users/shubh/n8n-office/python'); from integrations.audit_log import AuditLog; a = AuditLog(os.environ.get('AUDIT_LOG_PATH', '/Users/shubh/n8n-office/cache/audit_log.sqlite'), pepper=os.environ['AUDIT_LOG_PEPPER']); p = json.loads(sys.stdin.read()); a.log(**p); print('ok')`\n    ],\n    audit_stdin: JSON.stringify(auditPayload),\n    response: {\n      ok: false,\n      stage: 'verification',\n      reason: verify.reason || 'verification failed'\n    }\n  }\n}];\n"
+      },
+      "id": "node-build-audit-reject",
+      "name": "Build audit row (rejected)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1140, 540]
+    }
+  ],
+  "connections": {
+    "RC SMS Webhook (POST /sms)": {
+      "main": [[{ "node": "Verify RC Webhook", "type": "main", "index": 0 }]]
+    },
+    "Verify RC Webhook": {
+      "main": [[{ "node": "Is validation handshake?", "type": "main", "index": 0 }]]
+    },
+    "Is validation handshake?": {
+      "main": [
+        [{ "node": "Echo Validation-Token (200)", "type": "main", "index": 0 }],
+        [{ "node": "Verified?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Verified?": {
+      "main": [
+        [{ "node": "Extract SMS fields", "type": "main", "index": 0 }],
+        [{ "node": "Build audit row (rejected)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract SMS fields": {
+      "main": [[{ "node": "Claude Haiku — Classify Intent", "type": "main", "index": 0 }]]
+    },
+    "Claude Haiku — Classify Intent": {
+      "main": [[{ "node": "Parse classifier reply", "type": "main", "index": 0 }]]
+    },
+    "Parse classifier reply": {
+      "main": [[{ "node": "Dispatch by intent", "type": "main", "index": 0 }]]
+    },
+    "Dispatch by intent": {
+      "main": [
+        [{ "node": "Handler: appointment (stub)", "type": "main", "index": 0 }],
+        [{ "node": "Handler: file_request (stub)", "type": "main", "index": 0 }],
+        [{ "node": "Handler: patient_lookup (stub)", "type": "main", "index": 0 }],
+        [{ "node": "Handler: general_message (stub)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Handler: appointment (stub)": {
+      "main": [[{ "node": "Build audit row", "type": "main", "index": 0 }]]
+    },
+    "Handler: file_request (stub)": {
+      "main": [[{ "node": "Build audit row", "type": "main", "index": 0 }]]
+    },
+    "Handler: patient_lookup (stub)": {
+      "main": [[{ "node": "Build audit row", "type": "main", "index": 0 }]]
+    },
+    "Handler: general_message (stub)": {
+      "main": [[{ "node": "Build audit row", "type": "main", "index": 0 }]]
+    },
+    "Build audit row": {
+      "main": [[{ "node": "Append to audit_log (SQLite)", "type": "main", "index": 0 }]]
+    },
+    "Build audit row (rejected)": {
+      "main": [[{ "node": "Append to audit_log (SQLite)", "type": "main", "index": 0 }]]
+    },
+    "Append to audit_log (SQLite)": {
+      "main": [[{ "node": "Respond 200 (always)", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "",
+    "timezone": "America/New_York"
+  },
+  "versionId": "0.1.0",
+  "id": "triage-router",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "description": "Triage Agent + Intent Router (the front door). Mirrors flows/triage-router.py. POST /sms receives RC webhook, verifies signature, classifies with Claude Haiku into {appointment, file_request, patient_lookup, general_message}, dispatches to per-intent handler stub, writes ONE row to audit_log.py per request. Per Q10: always 200s so RC doesn't retry-then-disable; per Q11: requires Anthropic BAA before pointing at PHI. Credentials needed (set in n8n env): ANTHROPIC_API_KEY, RC_WEBHOOK_VERIFICATION_TOKEN, AUDIT_LOG_PEPPER. Optional: TRIAGE_MODEL, AUDIT_LOG_PATH."
+  },
+  "tags": [
+    { "name": "atlantic-pain-wellness" },
+    { "name": "front-door" },
+    { "name": "phi" }
+  ]
+}

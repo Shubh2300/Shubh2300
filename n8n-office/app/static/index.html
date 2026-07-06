@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Atlantic Pain &amp; Wellness · Head Injury Institute — Back Office</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- ==================================================================
+       LOGIN VIEW
+       Shown when no valid session (initial load or after a 401).
+       =================================================================== -->
+  <section id="view-login" class="login-view" hidden>
+    <div class="login-card">
+      <div class="login-brand">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <div class="brand-lines">
+          <strong>Atlantic Pain &amp; Wellness</strong>
+          <span>Head Injury Institute — Back Office</span>
+        </div>
+      </div>
+      <form id="login-form" autocomplete="off" novalidate>
+        <label class="field">
+          <span>Username</span>
+          <input id="login-username" name="username" type="text"
+                 autocomplete="username" required />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="login-password" name="password" type="password"
+                 autocomplete="current-password" required />
+        </label>
+        <button type="submit" class="btn btn-primary" id="login-submit">
+          Sign in
+        </button>
+        <p id="login-error" class="form-error" role="alert" hidden></p>
+      </form>
+      <p class="login-foot">Internal tool. PHI stays on this network.</p>
+    </div>
+  </section>
+
+  <!-- ==================================================================
+       APP SHELL (sidebar nav + brand header + view outlet)
+       =================================================================== -->
+  <div id="app-shell" class="app-shell" hidden>
+    <header class="brand-header">
+      <div class="brand-header-left">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <div class="brand-lines">
+          <strong>Atlantic Pain &amp; Wellness · Head Injury Institute</strong>
+          <span>Back Office · Bala Cynwyd</span>
+        </div>
+      </div>
+      <div class="brand-header-right">
+        <span id="health-pill" class="health-pill" title="Backend status">
+          <span class="dot"></span><span class="health-text">checking…</span>
+        </span>
+        <span id="who-am-i" class="whoami"></span>
+        <button id="logout-btn" class="btn btn-ghost" type="button">
+          Sign out
+        </button>
+      </div>
+    </header>
+
+    <div class="app-body">
+      <nav class="sidebar" aria-label="Primary">
+        <button class="nav-item" data-view="home" type="button">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>
+            <path d="M9.5 21v-6h5v6"/>
+          </svg>
+          <span class="nav-label">Home</span>
+        </button>
+        <button class="nav-item" data-view="chat" type="button">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M4 5.5h16v10H9l-4 3.5v-3.5H4z"/>
+          </svg>
+          <span class="nav-label">Chat</span>
+        </button>
+        <button class="nav-item" data-view="approvals" type="button">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M4 5.5h11.5M4 12h11.5M4 18.5h7.5"/>
+            <path d="m16.5 17 2 2 3.5-4"/>
+          </svg>
+          <span class="nav-label">Approvals</span>
+          <span id="nav-approvals-count" class="nav-count" hidden>0</span>
+        </button>
+        <button class="nav-item" data-view="referrals" type="button">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M16 19v-1.5A3.5 3.5 0 0 0 12.5 14h-5A3.5 3.5 0 0 0 4 17.5V19"/>
+            <circle cx="10" cy="8" r="3.2"/>
+            <path d="M20 19v-1.5a3.5 3.5 0 0 0-2.6-3.38M15.5 5.2a3.2 3.2 0 0 1 0 5.6"/>
+          </svg>
+          <span class="nav-label">Referrals</span>
+          <span id="nav-referrals-count" class="nav-count" hidden>0</span>
+        </button>
+        <button class="nav-item" data-view="inbox" type="button">
+          <svg class="nav-ico" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <rect x="3.5" y="5.5" width="17" height="13" rx="2"/>
+            <path d="m4.5 7 7.5 5.5L19.5 7"/>
+          </svg>
+          <span class="nav-label">Inbox</span>
+          <span id="nav-inbox-count" class="nav-count" hidden>0</span>
+        </button>
+      </nav>
+
+      <main class="content" id="content">
+        <!-- HOME -->
+        <section id="view-home" class="view" hidden>
+          <div class="view-head">
+            <h1>Home</h1>
+            <div class="view-head-actions">
+              <button id="run-manager-btn" class="btn btn-primary" type="button">
+                Run Manager
+              </button>
+              <button class="btn btn-ghost" type="button" data-refresh="home">
+                Refresh
+              </button>
+            </div>
+          </div>
+          <div class="with-rail">
+            <div id="home-body" class="home-grid rail-main">
+              <div class="loading">Loading…</div>
+            </div>
+            <aside id="home-summary" class="summary-rail"
+                   aria-label="Awaiting approval summary"></aside>
+          </div>
+        </section>
+
+        <!-- CHAT -->
+        <section id="view-chat" class="view chat-view" hidden>
+          <div class="view-head">
+            <h1>Chat</h1>
+            <span class="view-head-note">Back-office assistant · writes route to
+              on-screen approval</span>
+          </div>
+          <div id="chat-log" class="chat-log" aria-live="polite"></div>
+          <form id="chat-form" class="chat-form">
+            <textarea id="chat-input" rows="1"
+                      placeholder="Ask about a patient, schedule, billing — or request a booking/cancel…"
+                      autocomplete="off"></textarea>
+            <button type="submit" class="btn btn-primary" id="chat-send">
+              Send
+            </button>
+          </form>
+        </section>
+
+        <!-- APPROVALS -->
+        <section id="view-approvals" class="view" hidden>
+          <div class="view-head">
+            <h1>Approvals</h1>
+            <div class="view-head-actions">
+              <label class="filter">
+                <span>Status</span>
+                <select id="approvals-filter">
+                  <option value="pending">Pending</option>
+                  <option value="approved">Approved</option>
+                  <option value="executed">Executed</option>
+                  <option value="failed">Failed</option>
+                  <option value="denied">Denied</option>
+                  <option value="">All</option>
+                </select>
+              </label>
+              <button class="btn btn-ghost" type="button" data-refresh="approvals">
+                Refresh
+              </button>
+            </div>
+          </div>
+          <div class="with-rail">
+            <div id="approvals-body" class="stack rail-main">
+              <div class="loading">Loading…</div>
+            </div>
+            <aside id="approvals-summary" class="summary-rail"
+                   aria-label="Awaiting approval summary"></aside>
+          </div>
+        </section>
+
+        <!-- REFERRALS -->
+        <section id="view-referrals" class="view" hidden>
+          <div class="view-head">
+            <h1>Referrals</h1>
+            <div class="view-head-actions">
+              <label class="filter">
+                <span>Status</span>
+                <select id="referrals-filter">
+                  <option value="">All</option>
+                  <option value="new">New</option>
+                  <option value="working">Working</option>
+                  <option value="booked">Booked</option>
+                  <option value="declined">Declined</option>
+                </select>
+              </label>
+              <button id="ingest-btn" class="btn btn-primary" type="button">
+                Ingest new
+              </button>
+              <button id="referral-audit-btn" class="btn btn-ghost" type="button">
+                Run referral audit
+              </button>
+              <button class="btn btn-ghost" type="button" data-refresh="referrals">
+                Refresh
+              </button>
+            </div>
+          </div>
+          <div id="referrals-body" class="stack">
+            <div class="loading">Loading…</div>
+          </div>
+        </section>
+
+        <!-- INBOX -->
+        <section id="view-inbox" class="view" hidden>
+          <div class="view-head">
+            <h1>Inbox</h1>
+            <div class="view-head-actions">
+              <label class="filter">
+                <span>Channel</span>
+                <select id="inbox-channel-filter">
+                  <option value="">All</option>
+                  <option value="email">Email</option>
+                  <option value="sms">SMS</option>
+                  <option value="fax">Fax</option>
+                  <option value="voicemail">Voicemail</option>
+                </select>
+              </label>
+              <label class="filter">
+                <span>Status</span>
+                <select id="inbox-status-filter">
+                  <option value="">All</option>
+                  <option value="new">New</option>
+                  <option value="triaged">Triaged</option>
+                  <option value="replied">Replied</option>
+                  <option value="archived">Archived</option>
+                  <option value="sent">Sent</option>
+                </select>
+              </label>
+              <button id="inbox-poll-btn" class="btn btn-primary" type="button">
+                Poll now
+              </button>
+              <button class="btn btn-ghost" type="button" data-refresh="inbox">
+                Refresh
+              </button>
+            </div>
+          </div>
+          <div id="inbox-body" class="inbox-layout">
+            <div id="inbox-list" class="inbox-list">
+              <div class="loading">Loading…</div>
+            </div>
+            <div id="inbox-detail" class="inbox-detail">
+              <div class="empty">Select a message to read it here.</div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- Toast host -->
+  <div id="toast-host" class="toast-host" aria-live="assertive"></div>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

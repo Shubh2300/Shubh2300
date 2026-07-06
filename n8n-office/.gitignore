@@ -1,0 +1,78 @@
+# Python bytecode / caches
+__pycache__/
+*.pyc
+
+# Local SQLite caches (EMR bridge cache, audit log)
+cache/*.db
+
+# runtime state + secrets — never track
+.env
+.env.*
+data/
+node_modules/
+.local/
+app/data/
+# ===== BEGIN projects-backup safety block (managed — edit outside this block) =====
+# --- Secrets & credentials (NEVER commit — ALL .env* included) ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+service_account*.json
+*serviceaccount*.json
+*client_secret*.json
+*credentials*.json
+gha-creds-*.json
+# --- Known secret-bearing config assets ---
+DevAgentSettings.asset
+DevAgentSettings.asset.meta
+# --- Session / auth state ---
+*_state.json
+*.session
+sis_browser_state.json
+# --- PHI / clinical data ---
+patient_database*.json
+patients_data*.js
+billing_ledger*.json
+calls.json
+followups*.json
+team_tasks*.json
+staff.json
+upcoming_schedule.json
+ar_reports/
+*.backup-*
+# --- Caches / logs / scratch ---
+cache/
+caches/
+logs/
+*.log
+scratch/
+.cache/
+tmp/
+# --- OS / editor cruft ---
+.DS_Store
+*.swp
+.idea/
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+# --- Node ---
+node_modules/
+.npm/
+dist/
+.next/
+# --- Local bundled runtime / browsers ---
+.local/
+browsers/
+**/ms-playwright/
+# ===== END projects-backup safety block =====

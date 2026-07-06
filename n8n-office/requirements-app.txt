@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+anthropic
+openai
+certifi  # CA bundle for outbound TLS (RingCentral/Gmail) on builds lacking system certs
+# optional (referral Sheet polling):
+# google-api-python-client
+# google-auth

@@ -1,0 +1,36 @@
+#!/bin/sh
+# Pre-commit secrets guard for Antigravity.
+# Blocks committing credential files and obvious secret material.
+# See the secure-secrets-handling skill. Bypass (rarely): git commit --no-verify
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+
+staged=$(git diff --cached --name-only --diff-filter=AM)
+[ -z "$staged" ] && exit 0
+
+blocked=""
+for f in $staged; do
+  case "$f" in
+    service_account.json|*-service-account.json|*-credentials.json|*.key|*.pem|*.p12)
+      blocked="$blocked\n  $f  (credential file)" ;;
+    .env|.env.*)
+      blocked="$blocked\n  $f  (env file)" ;;
+    webedoctor_login_*.png)
+      blocked="$blocked\n  $f  (RPA debug screenshot — may contain PHI)" ;;
+  esac
+done
+
+# Scan staged content for private-key material, regardless of filename.
+if git diff --cached -U0 --diff-filter=AM | grep -qE -- '-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+  blocked="$blocked\n  <staged changes contain a PRIVATE KEY block>"
+fi
+
+if [ -n "$blocked" ]; then
+  printf '\n\033[31m✗ Commit blocked by pre-commit secrets guard:\033[0m'
+  printf '%b\n' "$blocked"
+  printf '\nThese must never be committed. Unstage with: git reset HEAD <file>\n'
+  printf 'False positive? Bypass with: git commit --no-verify\n\n'
+  exit 1
+fi
+
+exit 0

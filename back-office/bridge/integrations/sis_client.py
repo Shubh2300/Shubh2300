@@ -1,5 +1,6 @@
-# VENDORED verbatim from n8n-office/python/integrations/sis_client.py
-# Copied into back-office/bridge/integrations/ as a proven module (do not edit lightly).
+# VENDORED from mainlinesurgery-a11y/n8n-office @ backoffice-autopilot-live-20260705, commit eec3888
+# Source path: python/integrations/sis_client.py
+# Re-vendored from the REAL, HAR-verified production repo (do not edit lightly).
 # SIS Complete REST client (read-only, via authenticated Playwright page).
 #!/usr/bin/env python3
 """
@@ -28,6 +29,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -602,6 +604,91 @@ class SISClient:
         except Exception:
             return {"_raw": body}
 
+    async def _api_call_pdf(
+        self,
+        method: str,
+        endpoint: str,
+        data: Any = None,
+        params: dict = None,
+    ) -> tuple[bytes, str]:
+        """
+        Sibling of _api_call for BINARY (PDF) responses.
+
+        Same header builder and serialized 401/403 re-login + single-retry
+        discipline as _api_call, but returns the raw response bytes plus the
+        Content-Type header instead of decoding JSON. Non-2xx statuses raise
+        exactly like _api_call (Exception with body text truncated to 300
+        chars); 401/403 after re-login raises EMRSessionExpired.
+
+        Returns:
+            (body_bytes, content_type)
+        """
+        if not self._browser_ctx:
+            raise EMRSessionExpired("SIS client not started — call start() first")
+
+        url = self.api_base + "/" + endpoint.lstrip("/")
+
+        def _build_headers() -> dict:
+            """Same per-(re)try header builder as _api_call — rebuilt on each
+            attempt so a post-refresh retry picks up the new tokens."""
+            h = {
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://e03.siscomplete.cloud",
+                "Referer": "https://e03.siscomplete.cloud/mainline/",
+            }
+            if data is not None:
+                h["Content-Type"] = "application/json"
+            if self._bearer_token:
+                h["Authorization"] = f"Bearer {self._bearer_token}"
+            if self._session_token:
+                h["token"] = self._session_token
+            return h
+
+        async def _do_call():
+            req_kwargs = {"headers": _build_headers(), "params": params or {}}
+            if data is not None:
+                req_kwargs["data"] = json.dumps(data)
+            m = method.upper()
+            if m == "GET":
+                return await self._browser_ctx.request.get(url, **req_kwargs)
+            if m == "POST":
+                return await self._browser_ctx.request.post(url, **req_kwargs)
+            raise ValueError(f"Unsupported HTTP method for PDF call: {method}")
+
+        token_before = self._bearer_token
+        resp = await _do_call()
+        status = resp.status
+
+        if status in (401, 403):
+            logger.info("SIS PDF API returned %d — serializing re-login", status)
+            async with self._login_lock:
+                # Double-checked locking on the token value — see _api_call.
+                if self._bearer_token == token_before:
+                    self._logged_in = False
+                    if not await self._login_locked():
+                        raise EMRSessionExpired(f"Re-login failed after {status}")
+                else:
+                    logger.info(
+                        "SIS token already refreshed by a concurrent call — "
+                        "skipping redundant re-login"
+                    )
+            resp = await _do_call()
+            status = resp.status
+            if status in (401, 403):
+                raise EMRSessionExpired(f"Still {status} after re-login")
+
+        if status >= 400:
+            body = ""
+            try:
+                body = await resp.text()
+            except Exception:
+                pass
+            raise Exception(f"HTTP {status}: {body[:300]}")
+
+        body_bytes = await resp.body()
+        content_type = (resp.headers or {}).get("content-type", "")
+        return body_bytes, content_type
+
     # ------------------------------------------------------------------
     # Public API methods
     # ------------------------------------------------------------------
@@ -682,6 +769,93 @@ class SISClient:
         if isinstance(result, list):
             return result
         return result.get("Data", result.get("data", []))
+
+    @staticmethod
+    def _unwrap_list(result: Any, route: str) -> list[dict]:
+        """Unwrap a list payload from a SIS response envelope — FAIL CLOSED.
+
+        Accepts a bare JSON list, or a dict envelope carrying the list under
+        "Data"/"data" (the two envelope keys observed live on this API).
+        ANYTHING else — an unrecognized envelope, a non-list Data value, a
+        non-JSON body ({"_raw": ...}) — raises instead of returning []: an
+        empty list must only ever mean "the route really returned no rows",
+        never "we did not understand the response" (a silent [] from an
+        unrecognized envelope would read as an honest no-data result, e.g. a
+        fabricated $0 billing picture). Used by the HAR-derived routes whose
+        envelopes are NOT yet live-verified; error text carries key NAMES
+        only, never payload values.
+        """
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            for key in ("Data", "data"):
+                if key in result:
+                    inner = result[key]
+                    if isinstance(inner, list):
+                        return inner
+                    raise ValueError(
+                        f"SIS {route}: envelope key {key!r} holds "
+                        f"{type(inner).__name__}, not a list — refusing to "
+                        "guess (envelope not yet live-verified)"
+                    )
+            raise ValueError(
+                f"SIS {route}: unrecognized response envelope (keys "
+                f"{sorted(result)[:8]}) — refusing to return [] for a "
+                "response we did not understand"
+            )
+        raise ValueError(
+            f"SIS {route}: unexpected response type {type(result).__name__} "
+            "— refusing to return [] for a response we did not understand"
+        )
+
+    async def get_recent_patients(self, from_date: str = None) -> list[dict]:
+        """
+        POST /RecentPatients/GetRecentPatientsData — recently seen/accessed patients.
+
+        CONFIRMED BROKEN LIVE (2026-07-04): every call returns HTTP 400
+        "Value does not fall within the expected range." The HAR only
+        captured the body KEY name ("fromDate"), not a real value — 5 candidate
+        formats were probed live (ISO with .000Z, ISO without ms, bare
+        YYYY-MM-DD, clinic-local-midnight, and a 7-days-ago variant) and ALL
+        failed identically, which rules out a date-format problem: either the
+        body needs an additional required field the HAR never captured, the
+        key name/type itself differs, or the route needs different auth/paging
+        context. Do NOT keep guessing formats — this needs a fresh write-HAR
+        of a real RecentPatients call (same discipline this codebase already
+        applies to Svigg's bk_p: a HAR that only shows the route, not the
+        body, blocks the feature until captured live). This method is left in
+        place (it may still be useful once the real contract is known) but
+        callers should expect it to raise until then.
+        """
+        if from_date is None:
+            # Clinic-local (UTC-4) "now", whose DATE is the local calendar
+            # day; local midnight = that date at 04:00Z.
+            local_now = datetime.utcnow() - timedelta(hours=4)
+            from_date = local_now.strftime("%Y-%m-%dT04:00:00.000Z")
+        result = await self._api_call(
+            "POST",
+            "RecentPatients/GetRecentPatientsData",
+            data={"fromDate": from_date},
+        )
+        return self._unwrap_list(result, "RecentPatients/GetRecentPatientsData")
+
+    async def get_user_permissions(self) -> dict:
+        """
+        GET /Security/Permissions + GET /Security/UserRole — the current user's
+        permission set and role (session/security metadata, no PHI).
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Both routes returned
+        HTTP 200 in the capture under a live SIS session.)
+
+        Returns:
+            {"permissions": <raw /Security/Permissions payload>,
+             "role": <raw /Security/UserRole payload>}
+        Payloads are returned as-is (shapes not yet documented). If either call
+        fails, the exception propagates — no half-fabricated result.
+        """
+        permissions = await self._api_call("GET", "Security/Permissions")
+        role = await self._api_call("GET", "Security/UserRole")
+        return {"permissions": permissions, "role": role}
 
     async def get_schedule(self, date: str = None) -> dict:
         """
@@ -776,6 +950,45 @@ class SISClient:
         if isinstance(result, list):
             return result
         return result.get("data", result.get("Data", []))
+
+    async def get_block_schedule(self, start_iso: str, end_iso: str) -> list[dict]:
+        """
+        POST /BlockSchedule/GetBlockScheduleData — OR block-time schedule for a
+        date range.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) Body:
+            {"startDate": <iso>, "endDate": <iso>}
+        Same two-key ISO 8601 UTC pair as SchedulingData/GetSchedulingData —
+        callers should follow the .000Z/.999Z 04:00Z-anchor convention (see
+        get_schedule_day) unless discovery proves a different anchor. An empty
+        list is a valid result (no blocks in the window).
+        """
+        result = await self._api_call(
+            "POST",
+            "BlockSchedule/GetBlockScheduleData",
+            data={"startDate": start_iso, "endDate": end_iso},
+        )
+        return self._unwrap_list(result, "BlockSchedule/GetBlockScheduleData")
+
+    async def get_anesthesia_schedule(self, start_iso: str, end_iso: str) -> list[dict]:
+        """
+        GET /AnesthesiaScheduling/ with startDate/endDate query params —
+        anesthesia-side schedule for a date range.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) Params:
+            {"startDate": <iso>, "endDate": <iso>}
+        ISO 8601 UTC strings, same convention as the SchedulingData windows.
+        The trailing slash on the controller root is the observed capture form.
+        An empty list is a valid result.
+        """
+        result = await self._api_call(
+            "GET",
+            "AnesthesiaScheduling/",
+            params={"startDate": start_iso, "endDate": end_iso},
+        )
+        return self._unwrap_list(result, "AnesthesiaScheduling/")
 
     async def get_case_details(self, case_id: int) -> dict:
         """
@@ -885,6 +1098,188 @@ class SISClient:
         if isinstance(result, dict) and "_raw" in result:
             return result["_raw"]
         return "" if result is None else str(result)
+
+    async def get_case_procedures(self, case_id: int) -> list[dict]:
+        """
+        GET /RecordHeader/{case_id}/GetCaseProcedurebyCase
+        Procedures attached to a case (rows carry the caseProcedureId consumed
+        by get_case_diagnoses).
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) An empty list is a valid
+        result (no procedures on the case).
+        """
+        result = await self._api_call(
+            "GET", f"RecordHeader/{int(case_id)}/GetCaseProcedurebyCase"
+        )
+        return self._unwrap_list(
+            result, "RecordHeader/GetCaseProcedurebyCase")
+
+    async def get_case_record(self, case_id: int) -> dict:
+        """
+        GET /RecordHeader/{case_id}/GetPatientRecordByCaseSummaryId
+        Chart/record header for a case.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) Response returned as-is
+        (shape not yet documented).
+        """
+        return await self._api_call(
+            "GET", f"RecordHeader/{int(case_id)}/GetPatientRecordByCaseSummaryId"
+        )
+
+    async def get_case_diagnoses(self, case_id: int, procedure_id: int) -> list[dict]:
+        """
+        GET /RecordHeader/{case_id}/{procedure_id}/GetDiagnosisbyCaseAndProcedure
+        Diagnoses linked to one procedure on a case.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) EXPERIMENTAL: the two-slot
+        path order is ASSUMED to be (caseSummaryId, caseProcedureId) —
+        procedure_id should be a caseProcedureId taken from get_case_procedures
+        rows, not a catalog procedure id. An empty list is a valid result.
+        """
+        result = await self._api_call(
+            "GET",
+            f"RecordHeader/{int(case_id)}/{int(procedure_id)}/GetDiagnosisbyCaseAndProcedure",
+        )
+        return self._unwrap_list(
+            result, "RecordHeader/GetDiagnosisbyCaseAndProcedure")
+
+    async def get_worklist_case_details(self, case_id: int, module_id: int = 1020) -> dict:
+        """
+        GET /WorklistCaseDetails/GetCaseDetails/{case_id}/{module_id}
+        Worklist view of a case for one clinical module.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) The 2nd path slot was ALWAYS
+        a module id in the HAR (observed values 1010/1020/1030/1060/1080 —
+        Pre-Admission/Pre-Operative/Operative/Recovery/Post-Operative per the
+        SSRS_REPORTS map). Default 1020 = Pre-Operative. Response returned
+        as-is (shape not yet documented).
+        """
+        return await self._api_call(
+            "GET",
+            f"WorklistCaseDetails/GetCaseDetails/{int(case_id)}/{int(module_id)}",
+        )
+
+    async def get_facesheet_case_detail(self, patient_id: int, case_id: int) -> dict:
+        """
+        GET /PatientFacesheet/GetCaseDetailInformation/{patient_id}/{case_id}
+        Face-sheet case-detail block for one case.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session; slot order (patientId, caseId)
+        was observed directly in the HAR.) Response returned as-is.
+        """
+        return await self._api_call(
+            "GET",
+            f"PatientFacesheet/GetCaseDetailInformation/{int(patient_id)}/{int(case_id)}",
+        )
+
+    async def get_cover_page(
+        self, patient_id: int, case_id: int, module_id: int = 1010
+    ) -> dict:
+        """
+        GET /PatientFacesheet/GetCoverPageInformation/{patient_id}/{case_id}/{module_id}
+        Chart cover-page info for a case within one clinical module.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) Default module_id=1010 =
+        Pre-Admission. Response returned as-is (shape not yet documented).
+        """
+        return await self._api_call(
+            "GET",
+            f"PatientFacesheet/GetCoverPageInformation/{int(patient_id)}/{int(case_id)}/{int(module_id)}",
+        )
+
+    async def get_primary_physician(self, case_id: int) -> Any:
+        """
+        GET /Staff/GetPrimaryPhysicianFromCase?caseSummaryId={case_id}
+        Primary physician for a case.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) Response returned as-is — may
+        be a dict or a bare string; a non-JSON body arrives as {"_raw": <str>}
+        per _api_call's contract.
+        """
+        return await self._api_call(
+            "GET",
+            "Staff/GetPrimaryPhysicianFromCase",
+            params={"caseSummaryId": int(case_id)},
+        )
+
+    async def get_consent_signed(self, case_id: int) -> Any:
+        """
+        GET /ConsentClinical/IsAllConsentsSignedOfACase/{case_id}
+        Whether every consent on the case is signed.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) Expected to be a bare JSON
+        boolean, but returned as-is — do not assume bool until live-verified.
+        """
+        return await self._api_call(
+            "GET", f"ConsentClinical/IsAllConsentsSignedOfACase/{int(case_id)}"
+        )
+
+    async def get_risk_assessments(self, case_id: int, second_id: int) -> list[dict]:
+        """
+        GET /v2/CaseSummary/{case_id}/RiskAssessment/{kind}/{second_id}
+        for each kind in [DvtPrevention, DvtRisk, Fall, Fire, Ponv, StopBang].
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Routes returned HTTP 200
+        in the capture under a live SIS session.) EXPERIMENTAL: second_id was
+        observed in the HAR as a module-id-like value (e.g. 1020) — its exact
+        semantics are unconfirmed; pass the value observed for your module
+        context.
+
+        HTTP 204 / empty body means the assessment is simply NOT RECORDED for
+        the case — a valid result, not an error. (_api_call maps any empty body
+        to {}, so an empty dict here is read as "not recorded".)
+
+        Returns one entry per kind, honestly tri-stated:
+            {"kind": str, "recorded": True, "data": <payload>}  # something stored
+            {"kind": str, "recorded": False}                    # empty/204 — not recorded
+            {"kind": str, "recorded": None, "error": str}       # call failed — unknown
+        """
+        kinds = ["DvtPrevention", "DvtRisk", "Fall", "Fire", "Ponv", "StopBang"]
+        out: list[dict] = []
+        for kind in kinds:
+            try:
+                result = await self._api_call(
+                    "GET",
+                    f"v2/CaseSummary/{int(case_id)}/RiskAssessment/{kind}/{int(second_id)}",
+                )
+            except Exception as e:
+                out.append({"kind": kind, "recorded": None, "error": str(e)})
+                continue
+            if result == {}:
+                out.append({"kind": kind, "recorded": False})
+            else:
+                out.append({"kind": kind, "recorded": True, "data": result})
+        return out
+
+    async def get_case_vitals(self, case_id: int) -> dict:
+        """
+        Case vitals / basic-module info — two calls combined:
+            GET /BasicModuleInfo/GetBasicModuleInfoByCaseSummaryId/{case_id}
+            GET /BasicModuleInfo/GetHtWtLastUpdated/{case_id}
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Both routes returned
+        HTTP 200 in the capture under a live SIS session.)
+
+        Returns:
+            {"basic_module": <payload>, "ht_wt_last_updated": <payload>}
+        Payloads returned as-is; either may legitimately be empty. If either
+        call fails, the exception propagates — no half-fabricated result.
+        """
+        basic = await self._api_call(
+            "GET", f"BasicModuleInfo/GetBasicModuleInfoByCaseSummaryId/{int(case_id)}"
+        )
+        ht_wt = await self._api_call(
+            "GET", f"BasicModuleInfo/GetHtWtLastUpdated/{int(case_id)}"
+        )
+        return {"basic_module": basic, "ht_wt_last_updated": ht_wt}
 
     async def get_dates_of_service(self, patient_id: int) -> list[dict]:
         """
@@ -1041,6 +1436,68 @@ class SISClient:
                             r.setdefault("_caseSummaryId", int(cs))
                             meds.append(r)
         return meds
+
+    async def get_hp_previously_signed(self, patient_id: int) -> Any:
+        """
+        GET /HistoryPhysicalClinical/PreviouslySignedForPatient/{patient_id}
+        Previously signed H&P (History & Physical) documents for a patient.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) Response returned as-is; an
+        empty result is valid (no previously signed H&P on file).
+        """
+        return await self._api_call(
+            "GET",
+            f"HistoryPhysicalClinical/PreviouslySignedForPatient/{int(patient_id)}",
+        )
+
+    async def get_chart_attachments_meta(self, patient_id: int, case_id: int) -> list[dict]:
+        """
+        GET /Attachments/v2/AllAttachmentsMetaData/{patient_id}/{case_id}
+        Metadata for chart attachments (documents/scans) — metadata only, this
+        does NOT download file contents.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) EXPERIMENTAL: the
+        (patientId, caseId) slot order is ASSUMED from adjacent
+        PatientFacesheet routes, not confirmed from the HAR. An empty list is a
+        valid result (no attachments).
+        """
+        result = await self._api_call(
+            "GET",
+            f"Attachments/v2/AllAttachmentsMetaData/{int(patient_id)}/{int(case_id)}",
+        )
+        return self._unwrap_list(
+            result, "Attachments/v2/AllAttachmentsMetaData")
+
+    async def get_attachment_types(self) -> list[dict]:
+        """
+        GET /ConfigAttachmentType/GetAllAttachmentTypes
+        Attachment-type lookup table (reference data, no PHI, no args).
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.)
+        """
+        result = await self._api_call(
+            "GET", "ConfigAttachmentType/GetAllAttachmentTypes"
+        )
+        return self._unwrap_list(
+            result, "ConfigAttachmentType/GetAllAttachmentTypes")
+
+    async def get_chart_attachment_consent_info(self, patient_id: int) -> dict:
+        """
+        GET /PatientFacesheet/GetPatientChartAttachmentAndConsentInfoV2/{patient_id}
+        Combined chart-attachment + consent status block for a patient.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) EXPERIMENTAL: the single path
+        slot was observed as a patientId in the HAR, but that reading is
+        unconfirmed from this client. Response returned as-is.
+        """
+        return await self._api_call(
+            "GET",
+            f"PatientFacesheet/GetPatientChartAttachmentAndConsentInfoV2/{int(patient_id)}",
+        )
 
     # ------------------------------------------------------------------
     # Billing / AR / financials (verified live 2026-06-30, HTTP 200)
@@ -1205,6 +1662,232 @@ class SISClient:
             return result
         return result.get("Data", result.get("data", []))
 
+    async def get_case_charges(self, case_id: int) -> list[dict]:
+        """
+        GET /RCMTracker/RCMGetAllChargesByCaseSummaryId/{case_id}
+        All charge rows for a case (revenue-cycle view).
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) An empty list is a valid
+        result (no charges posted on the case).
+        """
+        result = await self._api_call(
+            "GET", f"RCMTracker/RCMGetAllChargesByCaseSummaryId/{int(case_id)}"
+        )
+        return self._unwrap_list(
+            result, "RCMTracker/RCMGetAllChargesByCaseSummaryId")
+
+    async def get_case_responsible_parties(self, case_id: int) -> dict:
+        """
+        Responsible parties for a case — two calls combined:
+            GET /RCMTracker/RCMInsuranceResponsibleParty/{case_id}
+            GET /RCMTracker/RCMGuarantorResponsibleParty/{case_id}
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Both routes returned
+        HTTP 200 in the capture under a live SIS session.)
+
+        Returns:
+            {"insurance": <payload>, "guarantor": <payload>}
+        Payloads returned as-is; either may legitimately be empty (e.g. pure
+        self-pay case → empty insurance block). The insurance rows are the
+        expected source of the party id consumed by get_charges_for_insurance.
+        If either call fails, the exception propagates.
+        """
+        insurance = await self._api_call(
+            "GET", f"RCMTracker/RCMInsuranceResponsibleParty/{int(case_id)}"
+        )
+        guarantor = await self._api_call(
+            "GET", f"RCMTracker/RCMGuarantorResponsibleParty/{int(case_id)}"
+        )
+        return {"insurance": insurance, "guarantor": guarantor}
+
+    async def get_charges_for_insurance(self, party_id: int, case_id: int) -> list[dict]:
+        """
+        GET /RCMTracker/RCMChargesForInsurance/{party_id}/{case_id}
+        Charges attributed to one insurance responsible party on a case.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) EXPERIMENTAL: the FIRST path
+        slot is assumed to be a responsible-party/carrier id (likely taken from
+        get_case_responsible_parties' insurance rows) — unconfirmed. An empty
+        list is a valid result.
+        """
+        result = await self._api_call(
+            "GET",
+            f"RCMTracker/RCMChargesForInsurance/{int(party_id)}/{int(case_id)}",
+        )
+        return self._unwrap_list(
+            result, "RCMTracker/RCMChargesForInsurance")
+
+    async def get_insurance_verification_queue(
+        self, dos_from: str, dos_to: str, page: int = 1
+    ) -> list[dict]:
+        """
+        POST /InsuranceTracker/GetTrackerData
+        Insurance-verification work queue for a date-of-service window.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) BEST-EFFORT BODY: the HAR
+        capture yielded the request KEY NAMES only — the default values below
+        (empty filter lists, chargesToPullEnum 0, empty sort fields) are
+        best-effort guesses, NOT observed values. If the server rejects them it
+        surfaces as a normal HTTP 4xx/5xx exception from _api_call rather than
+        being masked. Body:
+            {"doSFrom", "doSTo", "physicianIds": [], "specialtyIds": [],
+             "appointmentTypeIds": [], "caseFlagIds": [], "chargesToPullEnum": 0,
+             "orderByColumn": "", "orderDir": "", "pageNumber": page}
+        """
+        result = await self._api_call(
+            "POST",
+            "InsuranceTracker/GetTrackerData",
+            data={
+                "doSFrom": dos_from,
+                "doSTo": dos_to,
+                "physicianIds": [],
+                "specialtyIds": [],
+                "appointmentTypeIds": [],
+                "caseFlagIds": [],
+                "chargesToPullEnum": 0,
+                "orderByColumn": "",
+                "orderDir": "",
+                "pageNumber": int(page),
+            },
+        )
+        return self._unwrap_list(result, "InsuranceTracker/GetTrackerData")
+
+    async def get_billing_tracker(self) -> list[dict]:
+        """
+        GET /InsuranceBillingTracker/GetTrackerData
+        Practice-wide insurance billing tracker.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) An empty list is a valid
+        result.
+        """
+        result = await self._api_call("GET", "InsuranceBillingTracker/GetTrackerData")
+        return self._unwrap_list(
+            result, "InsuranceBillingTracker/GetTrackerData")
+
+    async def get_charge_entry_tracker(self, date_time: str = None) -> list[dict]:
+        """
+        POST /ChargeEntryTracker/GetTrackerData — charge-entry work queue.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) Body mirrors the
+        UnsignedCasesTracker contract that get_unsigned_cases sends, exactly:
+            {"dateTime": <"%m/%d/%Y 00:00:00 -04:00">, "pageNumber": 1,
+             "columnId": 3, "orderType": 0}
+        date_time defaults to today in that local-midnight/-04:00 string form.
+        An empty list is a valid result.
+        """
+        if date_time is None:
+            date_time = datetime.now().strftime("%m/%d/%Y 00:00:00 -04:00")
+        result = await self._api_call(
+            "POST",
+            "ChargeEntryTracker/GetTrackerData",
+            data={"dateTime": date_time, "pageNumber": 1, "columnId": 3, "orderType": 0},
+        )
+        return self._unwrap_list(result, "ChargeEntryTracker/GetTrackerData")
+
+    async def get_clinical_doc_tracker(self, date_time: str = None) -> list[dict]:
+        """
+        POST /ClinicalDocumentationTracker/GetTrackerData — clinical
+        documentation work queue.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.) Body mirrors the
+        UnsignedCasesTracker contract that get_unsigned_cases sends, exactly:
+            {"dateTime": <"%m/%d/%Y 00:00:00 -04:00">, "pageNumber": 1,
+             "columnId": 3, "orderType": 0}
+        date_time defaults to today in that local-midnight/-04:00 string form.
+        An empty list is a valid result.
+        """
+        if date_time is None:
+            date_time = datetime.now().strftime("%m/%d/%Y 00:00:00 -04:00")
+        result = await self._api_call(
+            "POST",
+            "ClinicalDocumentationTracker/GetTrackerData",
+            data={"dateTime": date_time, "pageNumber": 1, "columnId": 3, "orderType": 0},
+        )
+        return self._unwrap_list(
+            result, "ClinicalDocumentationTracker/GetTrackerData")
+
+    async def get_case_coordination(self, page: int = 1) -> dict:
+        """
+        POST /CaseCoordinationTracker/GetTrackerData (+ GetTrackerDataCount)
+        Case-coordination request queue plus its total count.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Both routes returned
+        HTTP 200 in the capture under a live SIS session.) Both endpoints
+        receive the SAME body (empty filter lists; every status flag true
+        except completedTf):
+            {"recipientList": [], "requestTypes": [], "requestCategories": [],
+             "physicianIdList": [], "patientIdList": [], "acknowledgedTf": true,
+             "unacknowledgedTf": true, "requestedTf": true, "respondedTf": true,
+             "completedTf": false, "sortBy": "", "sortOrder": "",
+             "pageNumber": page}
+
+        Returns:
+            {"count": <GetTrackerDataCount payload as-is>,
+             "rows": <GetTrackerData rows, envelope-unwrapped>}
+        An empty rows list is a valid result. If either call fails, the
+        exception propagates.
+        """
+        body = {
+            "recipientList": [],
+            "requestTypes": [],
+            "requestCategories": [],
+            "physicianIdList": [],
+            "patientIdList": [],
+            "acknowledgedTf": True,
+            "unacknowledgedTf": True,
+            "requestedTf": True,
+            "respondedTf": True,
+            "completedTf": False,
+            "sortBy": "",
+            "sortOrder": "",
+            "pageNumber": int(page),
+        }
+        rows = await self._api_call(
+            "POST", "CaseCoordinationTracker/GetTrackerData", data=body
+        )
+        rows = self._unwrap_list(
+            rows, "CaseCoordinationTracker/GetTrackerData")
+        count = await self._api_call(
+            "POST", "CaseCoordinationTracker/GetTrackerDataCount", data=body
+        )
+        return {"count": count, "rows": rows}
+
+    async def get_insurance_carriers(self) -> list[dict]:
+        """
+        GET /InsuranceCarrierObject/GetInsuranceCarriers
+        Insurance-carrier lookup table (reference data, no args).
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Route returned HTTP 200
+        in the capture under a live SIS session.)
+        """
+        result = await self._api_call(
+            "GET", "InsuranceCarrierObject/GetInsuranceCarriers"
+        )
+        return self._unwrap_list(
+            result, "InsuranceCarrierObject/GetInsuranceCarriers")
+
+    async def get_transaction_codes(self, type_id: int = None) -> list[dict]:
+        """
+        GET /TransactionCode/GetTransactionCodeList — transaction-code lookup
+        table (reference data). When type_id is given, uses
+        GET /TransactionCode/GetTransactionCodeListByType/{type_id} instead.
+
+        HAR-derived 2026-07-01; NOT yet live-verified. (Both route forms
+        returned HTTP 200 in the capture under a live SIS session.)
+        """
+        if type_id is None:
+            endpoint = "TransactionCode/GetTransactionCodeList"
+        else:
+            endpoint = f"TransactionCode/GetTransactionCodeListByType/{int(type_id)}"
+        result = await self._api_call("GET", endpoint)
+        return self._unwrap_list(result, endpoint)
+
     async def get_total_transactions(self, patient_id: int) -> dict:
         """
         POST /CaseToCodeComplex/GetTotalTransactionsByPatient
@@ -1334,6 +2017,177 @@ class SISClient:
             "patient_balance": None,
             "in_statements_tracker": False,
             "note": "No statements-tracker row and ledger aging had no numeric totals.",
+        }
+
+    # ------------------------------------------------------------------
+    # SSRS report PDFs (read-only fetch; leaves an access-audit row in SIS)
+    # ------------------------------------------------------------------
+
+    #: Known SSRS chart reports: name -> {module_id, audit_label, body_module}.
+    #: body_module=False → the HAR capture for that report sent {"CaseID": ...}
+    #: ONLY (no ModuleID key in the body); we match each capture exactly.
+    SSRS_REPORTS = {
+        "Pre-Admission Print Out": {
+            "module_id": 1010,
+            "audit_label": "Pre-Admission Print Out",
+            "body_module": True,
+        },
+        "Pre-Operative Print Out": {
+            "module_id": 1020,
+            "audit_label": "Signed Pre-Operative Viewed",
+            "body_module": True,
+        },
+        "Operative Print Out": {
+            "module_id": 1030,
+            "audit_label": "Operative Print Out",
+            "body_module": False,
+        },
+        "Recovery Print Out": {
+            "module_id": 1060,
+            "audit_label": "Recovery Print Out",
+            "body_module": False,
+        },
+        "Post-Operative Print Out": {
+            "module_id": 1080,
+            "audit_label": "Post-Operative Print Out",
+            "body_module": True,
+        },
+    }
+
+    async def get_report_pdf(
+        self,
+        report_name: str,
+        case_id: int,
+        module_id: int = None,
+        out_dir: str = None,
+    ) -> dict:
+        """
+        POST /Reports/SSRSReport/GetReportAsPdfAndAudit/{report_name}/false/{case_id}/{module_id}/{audit_label}
+        Fetch a chart print-out as a PDF and save it to disk.
+
+        HAR-derived 2026-07-01; NOT yet live-verified from this client. (All
+        five report routes returned HTTP 200 application/pdf in the capture
+        under a live SIS session.) The path-vs-body contract is FULLY RESOLVED
+        from the HAR: the case id in the path always EQUALS the CaseID in the
+        JSON body {"CaseID": <case_id>, "ModuleID": <module_id>} — except the
+        Operative and Recovery captures, whose bodies carried CaseID only; this
+        method reproduces each report's captured body exactly (see
+        SSRS_REPORTS).
+
+        ⚠️ AUDIT TRAIL (by design): the endpoint name ends in "AndAudit" — SIS
+        writes an access-audit row on ITS side every time this is called. It is
+        still a READ (no chart data is modified), and leaving that audit trail
+        is correct and desirable; just don't call it in tight loops.
+
+        Args:
+            report_name: one of SSRS_REPORTS (e.g. "Pre-Operative Print Out").
+                Unknown names are accepted ONLY with an explicit module_id
+                (audit_label then falls back to the report name and the body
+                includes ModuleID) — that combination is unverified.
+            case_id:     caseSummaryId.
+            module_id:   optional override for the mapped module id.
+            out_dir:     save directory; defaults to <repo>/app/data/reports/
+                         (resolves to /Users/shubh/n8n-office/app/data/reports/
+                         in this checkout; created with parents if missing).
+                         PHI CONTAINMENT: must resolve INSIDE <repo>/app/data/
+                         (the gitignored PHI tree) — any other path is refused
+                         with an error dict BEFORE the network call, so a
+                         chart PDF can never be written into a git-tracked
+                         (cloud-backed-up) directory.
+
+        The response MUST be genuine PDF bytes (magic prefix "%PDF-"). Anything
+        else — a JSON error, an HTML login page, an empty body — is NEVER saved
+        to disk; an honest error dict is returned instead:
+            {"error", "content_type", "body_preview", "report_name", "case_id"}
+        On success:
+            {"saved_path", "size_bytes", "report_name", "case_id"}
+        Transport/auth/non-2xx errors raise via _api_call_pdf's normal path.
+        """
+        spec = self.SSRS_REPORTS.get(report_name)
+        if spec is None and module_id is None:
+            return {
+                "error": (
+                    f"Unknown report {report_name!r} and no module_id given — "
+                    "refusing to guess. Known reports: "
+                    + ", ".join(sorted(self.SSRS_REPORTS))
+                ),
+                "report_name": report_name,
+                "case_id": int(case_id),
+            }
+
+        # PHI containment — validated BEFORE the network call so a bad path
+        # never triggers a live fetch (and a SIS-side access-audit row).
+        # <repo>/app/data is the gitignored PHI tree; sis_client.py lives at
+        # <repo>/python/integrations/, so parents[2] is the repo root.
+        phi_base = (Path(__file__).resolve().parents[2] / "app" / "data").resolve()
+        if out_dir:
+            target_dir = Path(out_dir).expanduser().resolve()
+            if phi_base != target_dir and phi_base not in target_dir.parents:
+                return {
+                    "error": (
+                        f"out_dir {str(target_dir)!r} is outside the "
+                        f"allowlisted PHI directory {str(phi_base)!r} — "
+                        "refusing to write a chart PDF (PHI) there; nothing "
+                        "was fetched or saved."
+                    ),
+                    "report_name": report_name,
+                    "case_id": int(case_id),
+                }
+        else:
+            target_dir = phi_base / "reports"
+
+        if spec is not None:
+            eff_module_id = int(module_id) if module_id is not None else int(spec["module_id"])
+            audit_label = spec["audit_label"]
+            body_module = spec["body_module"]
+        else:
+            eff_module_id = int(module_id)
+            audit_label = report_name
+            body_module = True
+
+        body: dict = {"CaseID": int(case_id)}
+        if body_module:
+            body["ModuleID"] = eff_module_id
+
+        endpoint = (
+            "Reports/SSRSReport/GetReportAsPdfAndAudit/"
+            f"{quote(report_name, safe='')}/false/{int(case_id)}/"
+            f"{eff_module_id}/{quote(audit_label, safe='')}"
+        )
+
+        pdf_bytes, content_type = await self._api_call_pdf("POST", endpoint, data=body)
+
+        if not pdf_bytes.startswith(b"%PDF-"):
+            # Honest failure: whatever came back is NOT a PDF — never save it.
+            preview = pdf_bytes[:200].decode("utf-8", errors="replace")
+            return {
+                "error": "Response is not a PDF (no %PDF- magic) — nothing saved.",
+                "content_type": content_type or "—",
+                "body_preview": preview,
+                "report_name": report_name,
+                "case_id": int(case_id),
+            }
+
+        # target_dir was resolved and containment-checked above, before the
+        # network call.
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in report_name)
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        slug = slug.strip("_") or "report"
+
+        saved_path = target_dir / f"case{int(case_id)}_{slug}.pdf"
+        saved_path.write_bytes(pdf_bytes)
+        logger.info(
+            "get_report_pdf: saved case %s report (%d bytes)", case_id, len(pdf_bytes)
+        )
+
+        return {
+            "saved_path": str(saved_path),
+            "size_bytes": len(pdf_bytes),
+            "report_name": report_name,
+            "case_id": int(case_id),
         }
 
     async def get_patient_record(self, patient_id: int) -> dict:
@@ -1473,7 +2327,9 @@ async def _main():
         sys.exit(1)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    client = SISClient(headless=False)
+    # Headless by DEFAULT — this manual debug runner must not pop a visible
+    # browser window unless a developer explicitly opts in with EMR_HEADED=1.
+    client = SISClient(headless=(os.environ.get("EMR_HEADED") != "1"))
 
     try:
         await client.start()

@@ -1,5 +1,6 @@
-# VENDORED verbatim from n8n-office/python/integrations/audit_log.py
-# Copied into back-office/bridge/integrations/ as a proven module (do not edit lightly).
+# VENDORED from mainlinesurgery-a11y/n8n-office @ backoffice-autopilot-live-20260705, commit eec3888
+# Source path: python/integrations/audit_log.py
+# Re-vendored from the REAL, HAR-verified production repo (do not edit lightly).
 # SHA-256 hash-chained, append-only audit log (HIPAA 164.312(b)).
 """
 audit_log.py — Append-only, hash-chained, SHA-256-peppered SQLite audit log

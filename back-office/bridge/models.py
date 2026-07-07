@@ -62,6 +62,14 @@ class BridgeResponse(BaseModel):
     as_of: Optional[str] = None             # ISO-8601 timestamp of the read
     screenshot_id: Optional[str] = None
     trace_id: Optional[str] = None
+    # -- proof-of-outcome (vendored clients capture a screenshot on EVERY
+    #    terminal outcome — success AND rejection/failure, not just success).
+    #    proof_captured is True only when a screenshot was actually written;
+    #    proof_kind labels what it shows: 'completed' (verified end-state) vs
+    #    'rejected' (what the system saw when it did NOT complete). Both are
+    #    additive/optional so existing envelope consumers are unaffected. ------
+    proof_captured: bool = False
+    proof_kind: Optional[str] = None        # 'completed' | 'rejected' | None
     requires_human_review: bool = False
     warnings: list[str] = Field(default_factory=list)
     failure_reason: Optional[str] = None

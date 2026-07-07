@@ -50,6 +50,23 @@ def _sha256_file(path: Path) -> Optional[str]:
         return None
 
 
+def allocate_proof(system: str, label: str = "post_action") -> dict:
+    """Reserve a proof-screenshot id + on-disk path WITHOUT taking the shot.
+
+    The vendored SviggScraper write methods (book/cancel/update_patient)
+    capture the proof screenshot THEMSELVES, on every terminal outcome
+    (success AND rejection/failure), when handed a ``proof_path``. This helper
+    mints the stable id + path (creating the screenshots dir) so the adapter
+    can pass ``file_path`` into the client and then, iff the client reports
+    ``proof_captured``, record ``screenshot_id`` on the BridgeResponse. No PHI
+    in the id/path — an id is an opaque timestamp+uuid.
+    """
+    _ensure_dirs()
+    screenshot_id = _new_id(f"shot_{system}_{label}")
+    out = SCREENSHOT_DIR / f"{screenshot_id}.png"
+    return {"screenshot_id": screenshot_id, "file_path": str(out)}
+
+
 async def capture_screenshot(page: Any, *, system: str, label: str = "post_action") -> dict:
     """Save a full-page screenshot of ``page`` and return its metadata.
 

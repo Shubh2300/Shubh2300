@@ -423,29 +423,35 @@
           "email only"
         ],
         "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
-        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess.",
+        "identity_guard": "FAIL-CLOSED name (token-bag) + DOB-when-both-present match against the RESOLVED chart's own name/DOB, enforced INSIDE the vendored client BEFORE the write (SviggScraper._identity_matches), covering BOTH the app Approve path AND the MCP path. A mismatch returns status=identity_mismatch and writes NOTHING (mapped here to status=failed with a proof screenshot of what the guard saw). Additive to the strong-match gate above; the bridge adapter passes patient name+dob in so the guard can bind."
       },
-      "success_condition": "submitted_verified \u2014 a date-guarded grid re-read finds the patient on the target date.",
+      "success_condition": "submitted_verified \u2014 the client's OWN date-guarded live grid re-read immediately after Submit finds the patient on the target date; the POST response alone is never trusted.",
       "failure_modes": [
+        "identity_mismatch (fail-closed name/DOB guard refused the write)",
+        "date_not_on_grid",
+        "no_free_slots",
+        "slot_conflict (slot full, office 2-per-slot cap reached)",
+        "callback_conflict (residual AutoReserve callback-table entry blocks re-book)",
+        "overbook_click_failed",
+        "submit_unconfirmed (Submit posted but the grid re-read did NOT find the patient \u2014 never trusted as success)",
+        "execute_blocked (SVIGG_BOOKING_EXECUTE off or acct not in BOOKING_ALLOWED_ACCTS)",
         "validation_bounced (blank cpt00)",
-        "slot_full",
-        "session_expired",
-        "stale_TFORMCOUNT",
-        "name_order_intolerance (D6)"
+        "session_expired"
       ],
-      "retry_behavior": "on slot_full re-post with Submit=Overbook + Duration00; never re-POST with a stale TFORMCOUNT; never trust 'submitted' without a verified re-read.",
-      "approval_requirements": "human approval required; single-use approval token checked at the POST site; acct allowlist enforced.",
+      "retry_behavior": "on slot_full re-post with Submit=Overbook + Duration00; TFORMCOUNT is parsed FRESH from each rendered form (never computed/reused); never trust 'submitted' without the client's own verified re-read.",
+      "approval_requirements": "human approval required; single-use approval token checked at the POST site; acct allowlist enforced; identity guard is an additional fail-closed net.",
       "post_action_verification": {
         "mandatory": true,
-        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
-        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "method": "the client itself re-reads the live grid (date-guarded) immediately after Submit and returns submitted_verified ONLY on a positive re-read, else submit_unconfirmed \u2014 the POST/302 alone is never trusted.",
+        "screenshot_proof": "the client captures a proof screenshot on EVERY terminal outcome \u2014 success AND rejection/refusal (identity_mismatch, no_free_slots, slot_conflict, date_not_on_grid, overbook_click_failed, submit_unconfirmed). The envelope carries proof_captured + proof_kind ('completed' on a verified success, 'rejected' otherwise) + screenshot_id.",
         "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
       },
       "output_schema": "bridge.models.BridgeResponse",
       "audit_proof_required": true,
       "implementation_status": "IMPLEMENTED_VENDORED",
       "implemented_by": {
-        "svigg": "SviggScraper.book_appointment (triple-gated; verify per SVIGG_SCHEDULING_CONTRACT.md)"
+        "svigg": "SviggScraper.book_appointment (triple-gated: SVIGG_BOOKING_EXECUTE + execute=True + confirm_unverified; identity guard + own post-submit grid re-read + proof on every outcome; HAR-verified vs the real physician-to-go booking capture)"
       }
     },
     {
@@ -464,14 +470,15 @@
         "approval token present (risk>=2)."
       ],
       "execution_steps": [
-        "Prefer the encounter-keyed path: resched.htm?enc -> resched_p (Delete) -> cancel2_p (CancelReason+Yes).",
-        "Fallback grid path: mre -> mre_p (Delete) -> cancel_p (CancelReason+Yes), parsing TFORMCOUNT fresh each step.",
-        "Date-guarded post-cancel grid re-read: assert the patient's row is gone on the real date."
+        "Locate the appointment on the target-day schedule and resolve its ENCOUNTER id (enc); disambiguate to exactly one via appointment_ref or time (refuse to guess).",
+        "HAR-faithful encounter-keyed cancel: GET resched.htm?enc -> GET resched_p.htm?TFORMCOUNT&Note1=&Delete=Delete -> GET cancel2_p?TFORMCOUNT&CancelReason=<or|pr>&Yes=Yes (COMMIT). TFORMCOUNT is a session-global counter READ FRESH from each rendered form (not computable).",
+        "The old book.htm grid-cell mre?/cancel_p path was PROVEN non-persisting by a real human-cancel HAR (0 hits) and has been removed.",
+        "Date-guarded post-cancel grid re-read: assert the patient's row is gone on the real date; status=cancelled with verified=True ONLY then."
       ],
       "selectors_needed": [
-        "svigg: resched/resched_p/cancel2_p (enc path)",
-        "mre/mre_p/cancel_p (grid path)",
-        "TFORMCOUNT field"
+        "svigg: resched.htm?enc / resched_p.htm (Delete) / cancel2_p (CancelReason+Yes) \u2014 enc-keyed path",
+        "per-day schedule appt link exposing enc (appt_e.htm?...&enc=)",
+        "TFORMCOUNT hidden field (read fresh each step)"
       ],
       "patient_verification_rules": {
         "strong_match": [
@@ -485,28 +492,30 @@
           "email only"
         ],
         "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
-        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess.",
+        "identity_guard": "FAIL-CLOSED name (token-bag) + DOB-when-both-present match against the RESOLVED chart's own name/DOB, enforced INSIDE the vendored client BEFORE the destructive step (SviggScraper._identity_matches), covering BOTH the app Approve path AND the MCP path. A mismatch returns status=identity_mismatch and deletes NOTHING (mapped here to status=failed with a proof screenshot). Additive to the acct+last_name allowlist binding below."
       },
-      "success_condition": "cancelled_verified \u2014 a date-guarded re-read confirms the appointment is gone.",
+      "success_condition": "status=cancelled with verified=True \u2014 a date-guarded post-cancel grid re-read confirms the appointment row is gone.",
       "failure_modes": [
-        "cancel_submitted_unverified (date guard could not apply)",
-        "stale_frame (D1)",
-        "ambiguous cell (D2)",
-        "No=No / missing Yes"
+        "identity_mismatch (fail-closed name/DOB guard refused the cancel)",
+        "not_found (appt not on that day's grid, or matches name but not the requested slot) \u2014 resurfaced with needs_human_choice + a recommended next route (day_rows vs slots)",
+        "ambiguous (multiple same-day rows match \u2014 pass time/appointment_ref to pin exactly one)",
+        "cancelled+verified=False (cancel submitted but re-read still shows a matching row \u2014 routed to human review, never success)",
+        "execute_blocked (acct+last_name not bound in CANCEL_ALLOWED_ACCT_NAMES)"
       ],
-      "retry_behavior": "never compute TFORMCOUNT (parse fresh); if unverifiable, return cancel_unconfirmed honestly, never success.",
-      "approval_requirements": "human approval required; single-use token at the destructive step; acct+last_name binding enforced.",
+      "retry_behavior": "TFORMCOUNT is parsed FRESH from each rendered form (never computed/reused); if the post-cancel re-read cannot confirm removal, return unverified honestly (needs_human_review), never success.",
+      "approval_requirements": "human approval required; single-use token at the destructive step; acct+last_name binding enforced; identity guard is an additional fail-closed net.",
       "post_action_verification": {
         "mandatory": true,
-        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
-        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
-        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+        "method": "the client itself re-reads the live grid (date-guarded) after the cancel2_p commit and sets verified=True ONLY when the patient's row is gone; the commit response alone is never trusted.",
+        "screenshot_proof": "the client captures a proof screenshot on EVERY terminal outcome \u2014 success AND rejection/refusal (identity_mismatch, not_found, unverified cancel). The envelope carries proof_captured + proof_kind ('completed' on a verified cancel, 'rejected' otherwise) + screenshot_id.",
+        "only_success_if": "the re-read positively confirms the appointment is gone; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
       },
       "output_schema": "bridge.models.BridgeResponse",
       "audit_proof_required": true,
       "implementation_status": "IMPLEMENTED_VENDORED",
       "implemented_by": {
-        "svigg": "SviggScraper.cancel_appointment (grid path implemented; enc path/date-guard hardening in svigg_reliability_fix.py, MERGE PENDING)"
+        "svigg": "SviggScraper.cancel_appointment (HAR-faithful encounter-keyed path fully merged \u2014 resched.htm?enc -> resched_p Delete -> cancel2_p Yes, fresh TFORMCOUNT per form; identity guard + own post-cancel date-guarded re-read + proof on every outcome; the old non-persisting grid path was removed)"
       }
     },
     {
@@ -524,7 +533,7 @@
         "A verified selector/wire contract for this operation."
       ],
       "execution_steps": [
-        "BLOCKED \u2014 No reschedule method exists; only cancel/book are implemented. The resched.htm flow in svigg_reliability_fix.py is a cancel-by-enc helper, not a full move."
+        "BLOCKED \u2014 No atomic reschedule/move method exists; only book + cancel are implemented. The resched.htm?enc flow is now merged into cancel_appointment as the encounter-keyed CANCEL path (a delete), not a move. SviggScraper.prepare_appointment_update is a read-only PREP step, not a committed move."
       ],
       "selectors_needed": [
         "UNKNOWN \u2014 real selectors/wire contract for this operation not mapped."
@@ -558,7 +567,7 @@
       "output_schema": "bridge.models.BridgeResponse",
       "audit_proof_required": true,
       "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
-      "blocked_reason": "No reschedule method exists; only cancel/book are implemented. The resched.htm flow in svigg_reliability_fix.py is a cancel-by-enc helper, not a full move.",
+      "blocked_reason": "No atomic reschedule/move method exists; only book + cancel are implemented. The resched.htm?enc flow is now merged into cancel_appointment as the encounter-keyed CANCEL path (a delete), not a move. A safe reschedule (book-new-then-verify-then-cancel-old, or the reverse) is not implemented; prepare_appointment_update is read-only prep.",
       "needed_from_user": [
         "Real EMR screen + HAR-derived wire contract",
         "DOM selectors",
@@ -742,19 +751,20 @@
         "demographics {last_name, first_name, ...}"
       ],
       "preconditions": [
-        "De-dupe search run first (idempotency).",
+        "De-dupe name-search run first (idempotency).",
         "approval token present (risk>=3).",
-        "SVIGG_CREATE_EXECUTE + confirm_unverified for any real Save."
+        "TRIPLE GATE for any real Save: SVIGG_CREATE_EXECUTE=1 (module kill-switch) AND dry_run=False AND confirm_unverified=True. Fail-closed: missing any one => execute_blocked, nothing written. NOTE: the app approval executor DELIBERATELY forces dry_run=True (approval authorizes discovery, not an unverified live save)."
       ],
       "execution_steps": [
-        "Open patientEntry_new.htm; run the name-search de-dupe (read-only).",
-        "If an existing chart matches name+dob -> STOP, report duplicate_suspected.",
-        "Open patientEntry_add.htm; DISCOVER add-form fields from the DOM; map demographics.",
-        "dry_run (DEFAULT): return would_submit payload; commit NOTHING.",
-        "commit (gated): fail-closed Save; tag response unverified (Save POST contract not in HAR)."
+        "Open patientEntry_new.htm; fill LastName/FirstName/MI/BirthDate/SSN/Account; POST the name-search DE-DUPE (read-only).",
+        "If an existing pentry.htm?rowid match surfaces for the same name+dob -> STOP, report duplicate_suspected (never double-create).",
+        "Open patientEntry_add.htm; DISCOVER add-form fields from the rendered DOM; map demographics (missing optionals render as honest blanks, never invented).",
+        "dry_run (DEFAULT): return discovered_fields + would_submit payload; commit NOTHING.",
+        "commit (triple-gated): fill demographics into the LIVE add form and click the HAR-confirmed NextTab submit (POST pentry.htm, Referer patientEntry_add.htm, ~53 params) — hidden tokens serialize from the rendered DOM (no stale hardcoding).",
+        "MANDATORY post-save re-search: independently re-search Svigg for the patient. created_verified ONLY on a positive re-read; else created_unverified + a loud warning (an HTTP 200 is NEVER trusted as success)."
       ],
       "selectors_needed": [
-        "svigg: patientEntry_new.htm / patientEntry_add.htm form fields (discovered at runtime)"
+        "svigg: patientEntry_new.htm (de-dupe) / patientEntry_add.htm form fields (discovered at runtime); NextTab submit control; pentry.htm Save POST"
       ],
       "patient_verification_rules": {
         "strong_match": [
@@ -770,25 +780,28 @@
         "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
         "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
       },
-      "success_condition": "dry_run: discovered fields + would_submit returned. commit: a re-read finds the new chart (currently returns save_unverified \u2014 fail-closed).",
+      "success_condition": "dry_run (DEFAULT): status=prepared with discovered_fields + would_submit returned (verified=False; nothing written) \u2014 this IS the honest success of a dry-run. commit: status=created_verified (verified=True) ONLY when the mandatory post-save re-search positively finds the new chart.",
       "failure_modes": [
-        "duplicate_suspected",
-        "save_unverified (Save contract unverified)",
+        "duplicate_suspected (existing chart matches name+dob \u2014 de-dupe stop, no create)",
+        "created_unverified (Save POST submitted but the post-save re-search did NOT confirm the chart \u2014 never trusted as success; routed to human review)",
+        "execute_blocked (triple gate not all satisfied)",
+        "save_unverified (add form no longer exposes the NextTab submit control \u2014 selector drift)",
         "session_expired"
       ],
-      "retry_behavior": "never double-create (de-dupe gate); commit stays fail-closed until the Save POST is HAR-verified.",
-      "approval_requirements": "human approval required; create allowlist + explicit confirm_unverified.",
+      "retry_behavior": "never double-create (de-dupe gate); commit stays fail-closed unless the triple gate is fully open AND the NextTab control is positively identified; success is claimed ONLY from a positive post-save re-search.",
+      "approval_requirements": "human approval required (risk>=3); create allowlist + explicit confirm_unverified; SVIGG_CREATE_EXECUTE kill-switch.",
       "post_action_verification": {
         "mandatory": true,
-        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
-        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
-        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+        "method": "MANDATORY independent post-save re-search of Svigg for the patient; created_verified only on a positive re-read, else created_unverified.",
+        "screenshot_proof": "on the commit path the bridge adapter captures a post-action screenshot of the end-state (evidence.py) and surfaces proof_captured + screenshot_id; dry-run writes nothing so needs no proof.",
+        "only_success_if": "the re-search positively confirms the new chart; otherwise return created_unverified (needs_human_review) \u2014 NEVER trust the HTTP 200 alone."
       },
       "output_schema": "bridge.models.BridgeResponse",
       "audit_proof_required": true,
       "implementation_status": "IMPLEMENTED_VENDORED",
+      "notes": "The add-form Save POST (pentry.htm, NextTab) IS now HAR-encoded from the base capture, but it is a SINGLE capture that has NEVER been run against the live EMR \u2014 UNVERIFIED-until-supervised-live-test. It stays dry-run by default and triple-gated; the first live create must be watched on test acct 22041163.",
       "implemented_by": {
-        "svigg": "SviggScraper.create_patient (dry-run discovery IMPLEMENTED; commit path gated + unverified)"
+        "svigg": "SviggScraper.create_patient (dry-run discovery IMPLEMENTED; HAR-encoded Save wired but triple-gated + dry-run-by-default + mandatory post-save re-search; created_verified vs created_unverified)"
       }
     },
     {
@@ -803,13 +816,13 @@
       "preconditions": [
         "Patient strong-matched.",
         "approval token present (risk>=3).",
-        "A verified write selector/wire contract."
+        "A demographic write that ACTUALLY PERSISTS server-side (see blocked_reason)."
       ],
       "execution_steps": [
-        "BLOCKED \u2014 No demographic-update write in the vendored clients (SIS is read-only; Svigg has create only)."
+        "BLOCKED \u2014 do NOT enable for real use. SviggScraper.update_patient EXISTS and is wire-correct (HAR-confirmed edit contract: pentry.htm, imageField image-button Save, ~54 params; resolve + identity-guard + open-prefilled-form + read-current + phone-format XXX-XXX-XXXX all confirmed working live), but the SAVE DOES NOT PERSIST on the server. The vendored gate SVIGG_EDIT_EXECUTE stays OFF; with it off update_patient is fully dry-run (reports current+proposed, writes nothing). The bridge does NOT wire this action into svigg_adapter \u2014 it returns a structured block."
       ],
       "selectors_needed": [
-        "UNKNOWN \u2014 real write selectors/wire contract not mapped."
+        "KNOWN but non-persisting: pentry.htm edit form + input[name=imageField] Save (HAR-confirmed). The blocker is server-side persistence, not a missing selector."
       ],
       "patient_verification_rules": {
         "strong_match": [
@@ -825,26 +838,26 @@
         "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
         "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
       },
-      "success_condition": "verified re-read confirms the change.",
+      "success_condition": "verified re-read confirms the change \u2014 UNREACHABLE today: the server does not persist the write, so a real Save always re-reads unchanged and the client honestly returns updated_unverified, never updated_verified.",
       "failure_modes": [
-        "not_implemented"
+        "server_side_non_persistence (CONFIRMED \u2014 see blocked_reason)",
+        "updated_unverified (re-read did not confirm; the only outcome a live Save can ever produce today)"
       ],
-      "retry_behavior": "n/a",
-      "approval_requirements": "human approval required (risk>=3).",
+      "retry_behavior": "n/a \u2014 do not attempt live writes against the test account hoping for a different result (per the session forensic finding, further scraper changes cannot fix a server-side persistence failure).",
+      "approval_requirements": "human approval required (risk>=3); additionally the office was explicitly told DO NOT ENABLE for real use.",
       "post_action_verification": {
         "mandatory": true,
-        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
-        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
-        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+        "method": "re-read the EMR after the write and confirm the change is really present; the client already does this and always finds the value unchanged.",
+        "screenshot_proof": "capture a post-action screenshot on success AND failure (the vendored update_patient supports proof_path); moot while blocked.",
+        "only_success_if": "the re-read positively confirms the change \u2014 which it never does today; otherwise updated_unverified \u2014 NEVER trust the HTTP 200 alone."
       },
       "output_schema": "bridge.models.BridgeResponse",
       "audit_proof_required": true,
       "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
-      "blocked_reason": "No demographic-update write in the vendored clients (SIS is read-only; Svigg has create only).",
+      "blocked_reason": "CONFIRMED SERVER-SIDE NON-PERSISTENCE. Per SESSION_HANDOFF_2026-07-06_demo-ready.md ('update_patient investigation'): network-level instrumentation of one live click proved the outgoing POST to pentry.htm carried the correct field+format (e.g. CellNumber=856-555-1234) and returned 200 OK, yet an independent re-read immediately after still showed the field blank. The client/scraper is proven correct at the wire level; the persistence failure is server-side (Svigg) or specific to the synthetic test account \u2014 NOT something further scraper changes can fix. SVIGG_EDIT_EXECUTE stays OFF and the office was told DO NOT ENABLE for real use. MUST remain blocked regardless of how complete the code looks.",
       "needed_from_user": [
-        "Real EMR write screen + HAR-derived wire contract",
-        "DOM selectors",
-        "test-acct verification"
+        "Svigg-side resolution of why a correct, 200-OK edit POST does not persist (Svigg vendor visibility, or a different disposable test record)",
+        "A supervised live-write confirmation that a saved demographic value actually survives an independent re-read before this is ever enabled"
       ]
     },
     {

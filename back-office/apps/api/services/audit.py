@@ -1,131 +1,138 @@
-"""Append-only, hash-chained audit writer.
+"""Append-only audit writer for the ``audit_logs`` table.
 
-Consistent with the toolbox's ``audit_log.py`` (n8n-office): every entry stores
-``prev_hash`` (the previous entry's ``entry_hash``) and ``entry_hash`` =
-SHA-256 over a canonical serialization of the entry fields plus ``prev_hash``.
-Any silent edit/deletion of an earlier row breaks the chain from that point.
+IMPORTANT: the hash chain (``prev_hash`` + ``entry_hash``) is computed by a
+BEFORE INSERT trigger in db/schema.sql (``audit_logs_hash_chain``) so the
+application cannot forge or forget it. This writer therefore only inserts the
+semantic columns; it never sets the hashes.
 
-NO PHI in the log: patient identifiers are hashed with a per-install pepper
-before storage, never written in the clear. Counts/ids only.
+``compute_entry_hash`` below mirrors the trigger's canonical serialization
+(pipe-joined field order, load-bearing) so the read/verify side can validate a
+chain in Python and stay consistent with the DB.
 
-The ``audit_logs`` table (owned by db/schema.sql) is assumed to expose at least:
-    id, ts, actor, action, intent, result_summary,
-    target_patient_id_hash, prev_hash, entry_hash
-
-The pure hashing helpers below have no I/O and are unit-testable. The
-``AuditWriter`` takes an injected connection factory so it stays decoupled from
-psycopg specifics.
+No PHI in logs: only identifiers-used (already minimized upstream) land in
+``patient_identifiers_used``; nothing here is written to application logs.
 """
 
 from __future__ import annotations
 
 import hashlib
-import hmac
-import json
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from psycopg.types.json import Json
 
 GENESIS_PREV_HASH = "0" * 64
 
-# Fixed field order for the hash preimage. Order is load-bearing — changing it
-# invalidates every existing chain.
-_HASHED_FIELDS = (
-    "ts",
-    "actor",
+# Field order MUST match audit_logs_hash_chain() in db/schema.sql exactly.
+_CANON_FIELDS = (
+    "actor_label",
+    "staff_prompt",
+    "parsed_intent",
+    "approver_label",
+    "target_system",
     "action",
-    "intent",
-    "target_patient_id_hash",
-    "result_summary",
+    "patient_identifiers_used",
+    "match_result",
+    "matched_by",
+    "pre_action_state",
+    "post_action_state",
+    "screenshot_id",
+    "trace_id",
+    "result",
+    "failure_reason",
+    "created_at",
 )
 
 
-def hash_patient_id(raw_id: Optional[str], pepper: Optional[str]) -> Optional[str]:
-    """SHA-256(pepper || raw_id). Same patient -> same hash (groupable) but the
-    raw identifier is never stored. Returns None for non-patient events."""
-    if not raw_id:
-        return None
-    key = (pepper or "").encode("utf-8")
-    return hmac.new(key, raw_id.encode("utf-8"), hashlib.sha256).hexdigest()
+def _canon_value(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, (list, tuple)):
+        return ",".join(str(x) for x in v)
+    return str(v)
 
 
-def compute_entry_hash(entry: Dict[str, Any], prev_hash: str) -> str:
-    """Canonical, deterministic hash over the entry + prev_hash."""
-    preimage = {k: entry.get(k) for k in _HASHED_FIELDS}
-    preimage["prev_hash"] = prev_hash
-    canonical = json.dumps(
-        preimage, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
+def compute_entry_hash(row: Dict[str, Any], prev_hash: str) -> str:
+    """Mirror the DB trigger's SHA-256 over the canonical field set + prev_hash.
+
+    ``row`` values should already be rendered the way Postgres casts them
+    (``parsed_intent`` as JSON text, ``created_at`` as its text form, etc.).
+    """
+    parts = [_canon_value(row.get(f)) for f in _CANON_FIELDS]
+    parts.append(prev_hash)
+    canonical = "|".join(parts)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def verify_chain(entries: list[Dict[str, Any]]) -> tuple[bool, Optional[Any]]:
-    """Verify an ordered list of entries. Returns (ok, first_broken_id)."""
+def verify_chain(entries: List[Dict[str, Any]]) -> tuple[bool, Optional[Any]]:
+    """Verify an ordered (ascending id) list of audit rows. Returns
+    (ok, first_broken_id). Each row must expose the raw column values plus
+    ``prev_hash``/``entry_hash``/``created_at`` (as text)."""
     prev = GENESIS_PREV_HASH
     for entry in entries:
         if entry.get("prev_hash") != prev:
             return False, entry.get("id")
-        expected = compute_entry_hash(entry, entry.get("prev_hash", prev))
-        if entry.get("entry_hash") != expected:
+        if entry.get("entry_hash") != compute_entry_hash(entry, prev):
             return False, entry.get("id")
         prev = entry["entry_hash"]
     return True, None
 
 
 class AuditWriter:
-    """Append-only writer over the ``audit_logs`` table.
+    """Append-only writer. ``connection_factory`` yields a psycopg connection
+    (e.g. ``db.get_connection``)."""
 
-    ``connection_factory`` is a context manager yielding a psycopg connection
-    (e.g. ``db.get_connection``). Kept injectable for testing.
-    """
-
-    def __init__(self, connection_factory, pepper: Optional[str] = None) -> None:
+    def __init__(self, connection_factory) -> None:
         self._conn_factory = connection_factory
-        self._pepper = pepper
 
     def append(
         self,
         *,
-        actor: str,
+        organization_id: str,
+        actor_label: str,
         action: str,
-        result_summary: str,
-        intent: Optional[str] = None,
-        patient_id: Optional[str] = None,
+        target_system: str,
+        result: str,
+        action_run_id: Optional[str] = None,
+        actor_user_id: Optional[str] = None,
+        approver_label: Optional[str] = None,
+        staff_prompt: Optional[str] = None,
+        parsed_intent: Optional[Dict[str, Any]] = None,
+        patient_identifiers_used: Optional[Dict[str, Any]] = None,
+        failure_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
-        ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        target_hash = hash_patient_id(patient_id, self._pepper)
-        entry = {
-            "ts": ts,
-            "actor": actor,
-            "action": action,
-            "intent": intent,
-            "target_patient_id_hash": target_hash,
-            "result_summary": result_summary,
-        }
-
         with self._conn_factory() as conn:
             with conn.cursor() as cur:
-                # Serialize against concurrent appends so the chain stays linear.
-                cur.execute("LOCK TABLE audit_logs IN EXCLUSIVE MODE")
-                cur.execute(
-                    "SELECT entry_hash FROM audit_logs ORDER BY id DESC LIMIT 1"
-                )
-                row = cur.fetchone()
-                prev_hash = (
-                    row["entry_hash"] if row else GENESIS_PREV_HASH
-                )
-                entry_hash = compute_entry_hash(entry, prev_hash)
                 cur.execute(
                     """
                     INSERT INTO audit_logs
-                        (ts, actor, action, intent, target_patient_id_hash,
-                         result_summary, prev_hash, entry_hash)
+                        (organization_id, action_run_id, actor_user_id,
+                         actor_label, staff_prompt, parsed_intent,
+                         approver_label, target_system, action,
+                         patient_identifiers_used, result, failure_reason)
                     VALUES
-                        (%(ts)s, %(actor)s, %(action)s, %(intent)s,
-                         %(target_patient_id_hash)s, %(result_summary)s,
-                         %(prev_hash)s, %(entry_hash)s)
-                    RETURNING id
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, prev_hash, entry_hash
                     """,
-                    {**entry, "prev_hash": prev_hash, "entry_hash": entry_hash},
+                    (
+                        organization_id,
+                        action_run_id,
+                        actor_user_id,
+                        actor_label,
+                        staff_prompt,
+                        Json(parsed_intent) if parsed_intent is not None else None,
+                        approver_label,
+                        target_system,
+                        action,
+                        Json(patient_identifiers_used)
+                        if patient_identifiers_used is not None
+                        else None,
+                        result,
+                        failure_reason,
+                    ),
                 )
-                new = cur.fetchone()
-        return {"id": new["id"], "prev_hash": prev_hash, "entry_hash": entry_hash}
+                row = cur.fetchone()
+        return {
+            "id": row["id"],
+            "prev_hash": row["prev_hash"],
+            "entry_hash": row["entry_hash"],
+        }

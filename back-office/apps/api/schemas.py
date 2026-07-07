@@ -1,10 +1,8 @@
-"""Pydantic v2 schemas shared across routers and services.
+"""Pydantic v2 schemas for the API surface.
 
-These are transport/validation models for the API surface. The canonical
-JSON Schema for an ActionIntent is owned by the action-registry package
-(``action_intent.schema.json``) and is what the AI parser is constrained to;
-``ActionIntent`` here is a permissive Python view over that shape so the API
-can carry it around and pass it to the registry validator and Temporal.
+ActionIntent mirrors packages/action-registry/action_intent.schema.json (the
+strict shape the AI parser is constrained to). Output models mirror the columns
+in db/schema.sql (owned by the schema sibling agent).
 """
 
 from __future__ import annotations
@@ -17,72 +15,50 @@ from pydantic import BaseModel, Field
 
 
 # --------------------------------------------------------------------------- #
-# Enums
+# Action intent (parser output / execution input) — matches action_intent.schema
 # --------------------------------------------------------------------------- #
-class ApprovalState(str, Enum):
-    proposed = "proposed"
-    pending_approval = "pending_approval"
-    approved = "approved"
-    rejected = "rejected"
-    executing = "executing"
-    verified = "verified"
-    failed = "failed"
-    needs_human_review = "needs_human_review"
-
-
-TERMINAL_STATES = frozenset(
-    {
-        ApprovalState.rejected,
-        ApprovalState.verified,
-        ApprovalState.failed,
-        ApprovalState.needs_human_review,
-    }
-)
-
-
-# --------------------------------------------------------------------------- #
-# Action intent (parser output / execution input)
-# --------------------------------------------------------------------------- #
-class PatientRef(BaseModel):
-    """A soft reference to a patient. Never fabricated by the parser — if the
-    prompt does not name a patient this stays empty and resolution happens
-    (and can fail-closed) at the bridge layer."""
-
-    patient_id: Optional[str] = None
+class PatientIdentifiers(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
-    dob: Optional[str] = None
-    system_ids: Dict[str, str] = Field(default_factory=dict)
+    dob: Optional[str] = None  # ISO YYYY-MM-DD
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    emr_id: Optional[str] = None  # exact SIS patient_id or Svigg acct
 
 
 class ActionIntent(BaseModel):
-    """Structured, reviewable representation of a staff request.
+    """Structured, reviewable representation of a staff request mapped onto
+    exactly one Action-Registry action. A proposal only — never executed until
+    a human approves it."""
 
-    This is *only* a proposal. It is never executed until a human approves it.
-    """
-
-    action: str
-    system: Optional[str] = None  # "sis" | "svigg"; may be derived from registry
-    patient: Optional[PatientRef] = None
-    inputs: Dict[str, Any] = Field(default_factory=dict)
-    rationale: Optional[str] = None
-    confidence: Optional[float] = None
-    requested_by: Optional[str] = None
+    action_name: str
+    target_system: str  # sis | svigg | both | unknown
+    risk_level: int  # 1 read, 2 schedule, 3 patient, 4 notes
+    requires_approval: bool
+    patient_identifiers: PatientIdentifiers = Field(default_factory=PatientIdentifiers)
+    action_inputs: Dict[str, Any] = Field(default_factory=dict)
+    missing_fields: List[str] = Field(default_factory=list)
+    reason: str = ""
 
 
 # --------------------------------------------------------------------------- #
-# Tasks
+# Tasks (tasks table: title/description/status/created_by/patient_id)
 # --------------------------------------------------------------------------- #
 class TaskCreate(BaseModel):
+    # The free-text staff request. Stored as description; title is derived.
     prompt: str = Field(min_length=1)
-    created_by: str
+    created_by: Optional[str] = None  # user uuid
+    patient_id: Optional[str] = None  # patient uuid
+    title: Optional[str] = None
 
 
 class TaskOut(BaseModel):
     id: str
-    prompt: str
-    created_by: str
+    title: str
+    description: Optional[str] = None
     status: str
+    created_by: Optional[str] = None
+    patient_id: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -102,6 +78,7 @@ class RegistryValidation(BaseModel):
     unknown_action: bool = False
     missing_inputs: List[str] = Field(default_factory=list)
     errors: List[str] = Field(default_factory=list)
+    implemented: bool = True
 
 
 class ParseResponse(BaseModel):
@@ -110,71 +87,82 @@ class ParseResponse(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Approvals
+# Approvals (approvals + action_runs tables)
 # --------------------------------------------------------------------------- #
 class SubmitForApprovalRequest(BaseModel):
     intent: ActionIntent
     task_id: Optional[str] = None
-    submitted_by: str
+    requested_by: Optional[str] = None  # user uuid
+    staff_prompt: Optional[str] = None
+    patient_id: Optional[str] = None
 
 
 class ApprovalDecision(BaseModel):
-    approver_user_id: str
+    approver_user_id: Optional[str] = None  # user uuid; v1 any staff may approve
     reason: Optional[str] = None
 
 
 class ApprovalOut(BaseModel):
     id: str
-    task_id: Optional[str] = None
-    action: str
-    state: ApprovalState
-    intent: Dict[str, Any]
-    submitted_by: Optional[str] = None
-    approver_user_id: Optional[str] = None
+    action_run_id: str
+    action_name: str
+    status: str  # approval_status enum
+    risk_level: int
+    proposed_action: Dict[str, Any]
+    requested_by: Optional[str] = None
+    approver_id: Optional[str] = None
+    decision_reason: Optional[str] = None
     decided_at: Optional[datetime] = None
     created_at: datetime
 
 
 # --------------------------------------------------------------------------- #
-# Action runs
+# Action runs (action_runs table)
 # --------------------------------------------------------------------------- #
 class ActionRunOut(BaseModel):
     id: str
-    approval_id: Optional[str] = None
-    workflow_id: Optional[str] = None
-    action: str
-    state: ApprovalState
-    status: Optional[str] = None  # bridge envelope status
+    action_name: Optional[str] = None
+    target_system: str
+    risk_level: int
+    status: str  # run_status enum
     verified: Optional[bool] = None
+    requires_human_review: bool = False
+    workflow_run_id: Optional[str] = None
+    task_id: Optional[str] = None
+    patient_id: Optional[str] = None
     screenshot_id: Optional[str] = None
     trace_id: Optional[str] = None
     failure_reason: Optional[str] = None
-    warnings: List[str] = Field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
 
 # --------------------------------------------------------------------------- #
-# Audit
+# Audit (audit_logs table — hash chain computed by DB trigger)
 # --------------------------------------------------------------------------- #
 class AuditEntryOut(BaseModel):
-    id: str
-    ts: datetime
-    actor: str
+    id: int
+    actor_label: str
     action: str
-    intent: Optional[str] = None
-    result_summary: str
+    target_system: str
+    result: str
+    failure_reason: Optional[str] = None
     prev_hash: str
     entry_hash: str
+    created_at: datetime
 
 
 # --------------------------------------------------------------------------- #
-# Patients (internal workflow-layer records)
+# Patients (patients table + patient_external_ids)
 # --------------------------------------------------------------------------- #
 class PatientOut(BaseModel):
     id: str
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     dob: Optional[str] = None
-    system_ids: Dict[str, str] = Field(default_factory=dict)
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    is_test_patient: bool = False
+    external_ids: Dict[str, str] = Field(default_factory=dict)
     created_at: datetime

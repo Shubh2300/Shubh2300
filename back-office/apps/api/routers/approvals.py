@@ -130,8 +130,14 @@ async def approve(approval_id: str, decision: ApprovalDecision) -> ApprovalOut:
             detail={"code": "intent_rejected", "errors": result.errors},
         )
 
+    # Mint a single-use approval token; store only its hash on the approval row
+    # (the bridge checks the token before any write). The raw token travels to
+    # the worker via the workflow argument and never touches Postgres.
+    approval_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(approval_token.encode("utf-8")).hexdigest()
+
     try:
-        row = approve_approval(approval_id, decision.approver_user_id)
+        row = approve_approval(approval_id, decision.approver_user_id, token_hash)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     if row is None:
@@ -155,6 +161,7 @@ async def approve(approval_id: str, decision: ApprovalDecision) -> ApprovalOut:
         approval_id=approval_id,
         action_run_id=action_run_id,
         intent=intent,
+        approval_token=approval_token,
     )
     set_workflow_temporal_ids(workflow_run_id, workflow_run_id, temporal_run_id)
 

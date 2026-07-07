@@ -54,7 +54,12 @@ export default function TasksPage() {
     setSubmitError(null);
     try {
       const task = await createTask({ prompt: text.trim(), createdBy: actingUser });
-      await submitForApproval({ intent, taskId: task.id, submittedBy: actingUser });
+      await submitForApproval({
+        intent,
+        taskId: task.id,
+        submittedBy: actingUser,
+        staffPrompt: text.trim(),
+      });
       setIntent(null);
       setText('');
       setSubmitted(true);

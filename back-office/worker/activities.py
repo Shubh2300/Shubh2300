@@ -171,6 +171,39 @@ async def call_bridge(req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# mark_run_status — advance action_runs.status through the run_status enum
+# (executing -> verifying -> terminal). The API sets 'executing' at hand-off;
+# the worker sets 'verifying' before the post-action verification step.
+# --------------------------------------------------------------------------- #
+_ALLOWED_RUN_STATUS = {"executing", "verifying"}
+
+
+@activity.defn
+async def mark_run_status(req: Dict[str, Any]) -> None:
+    status = req.get("status")
+    if status not in _ALLOWED_RUN_STATUS:
+        # Terminal states are only ever written by record_outcome; refuse to let
+        # this helper move a run into a terminal/approval state.
+        raise ApplicationError(
+            f"mark_run_status refuses status '{status}'",
+            type="IllegalRunStatus",
+            non_retryable=True,
+        )
+    import psycopg
+
+    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE action_runs SET status = %s WHERE id = %s",
+                (status, req["action_run_id"]),
+            )
+        conn.commit()
+    activity.logger.info(
+        "mark_run_status run=%s status=%s", req["action_run_id"], status
+    )
+
+
+# --------------------------------------------------------------------------- #
 # verify_result
 # --------------------------------------------------------------------------- #
 @activity.defn

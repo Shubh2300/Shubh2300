@@ -198,14 +198,16 @@ export interface ParsedIntentResult {
 }
 
 function normalizeIntent(raw: any): ActionIntent {
+  // Real backend shape (action_intent.schema.json): action_name, target_system,
+  // risk_level, action_inputs, patient_identifiers, missing_fields, reason.
   return {
-    action: raw.action ?? '—',
-    system: raw.system ?? undefined,
-    riskLevel: raw.risk_level ?? raw.riskLevel ?? undefined,
-    patient: normalizePatientRef(raw.patient ?? raw.patient_identifiers),
-    inputs: raw.inputs ?? undefined,
+    action: raw.action_name ?? raw.action ?? '—',
+    system: raw.target_system ?? raw.system ?? undefined,
+    riskLevel: raw.risk_level != null ? String(raw.risk_level) : undefined,
+    patient: normalizePatientRef(raw.patient_identifiers ?? raw.patient),
+    inputs: raw.action_inputs ?? raw.inputs ?? undefined,
     missingFields: raw.missing_fields ?? raw.missingFields ?? undefined,
-    reason: raw.rationale ?? raw.reason ?? undefined,
+    reason: raw.reason ?? raw.rationale ?? undefined,
     confidence: raw.confidence ?? undefined,
     raw,
   };
@@ -264,30 +266,26 @@ export interface Approval {
 }
 
 function normalizeApproval(raw: any): Approval {
-  const intent = raw.intent ?? raw.proposed_action ?? {};
+  // Real backend: ApprovalOut carries action_name + status (approval_status:
+  // pending/approved/rejected/expired/cancelled) + proposed_action (the
+  // reviewed ActionIntent, which holds target_system / action_inputs /
+  // patient_identifiers).
+  const intent = raw.proposed_action ?? raw.intent ?? {};
   return {
     id: String(raw.id),
-    action: raw.action ?? intent.action ?? '—',
-    system: raw.system ?? raw.target_system ?? intent.system ?? undefined,
-    riskLevel: raw.risk_level ?? raw.riskLevel ?? intent.risk_level ?? undefined,
-    // schemas.py's draft uses `state` (proposed/pending_approval/approved/...);
-    // db/schema.sql uses `status` (pending/approved/rejected/expired/cancelled).
-    // Normalize pending_approval -> pending so the queue's "pending" filter works either way.
-    status: normalizeApprovalStatus(raw.status ?? raw.state),
-    inputs: raw.inputs ?? intent.inputs ?? undefined,
-    patient: normalizePatientRef(raw.patient ?? intent.patient),
-    requestedBy: raw.requested_by ?? raw.submitted_by ?? undefined,
-    approvedBy: raw.approver_id ?? raw.approver_user_id ?? raw.approver_label ?? undefined,
-    reason: raw.decision_reason ?? raw.reason ?? undefined,
+    action: raw.action_name ?? intent.action_name ?? '—',
+    system: intent.target_system ?? raw.target_system ?? undefined,
+    riskLevel: raw.risk_level != null ? String(raw.risk_level) : undefined,
+    status: raw.status ?? 'pending',
+    inputs: intent.action_inputs ?? undefined,
+    patient: normalizePatientRef(intent.patient_identifiers),
+    requestedBy: raw.requested_by ?? undefined,
+    approvedBy: raw.approver_id ?? raw.approver_label ?? undefined,
+    reason: raw.decision_reason ?? undefined,
     createdAt: raw.created_at ?? undefined,
     decidedAt: raw.decided_at ?? undefined,
     raw,
   };
-}
-
-function normalizeApprovalStatus(status?: string): string {
-  if (!status) return 'pending';
-  return status === 'pending_approval' ? 'pending' : status;
 }
 
 export async function listApprovals(): Promise<Approval[]> {
@@ -305,13 +303,17 @@ export async function submitForApproval(input: {
   intent: ActionIntent;
   taskId?: string;
   submittedBy: string;
+  staffPrompt?: string;
 }): Promise<Approval> {
   const row = await apiFetch<any>('/approvals', {
     method: 'POST',
     body: JSON.stringify({
+      // The API's SubmitForApprovalRequest expects the strict ActionIntent
+      // (action_name/target_system/…) — send the raw backend intent.
       intent: input.intent.raw ?? input.intent,
       task_id: input.taskId || undefined,
-      submitted_by: input.submittedBy,
+      requested_by: input.submittedBy,
+      staff_prompt: input.staffPrompt || undefined,
     }),
   });
   return normalizeApproval(row);
@@ -367,16 +369,22 @@ export interface ActionRun {
 }
 
 function normalizeActionRun(raw: any): ActionRun {
+  // Real backend: ActionRunOut. status is the run_status enum
+  // (pending/planning/awaiting_approval/approved/executing/verifying/success/
+  // failed/blocked/needs_human_review/cancelled). screenshot_id / trace_id are
+  // the bridge-generated evidence KEY strings (resolved from the FK rows).
+  // action_runs has no warnings column — warnings live in the result JSONB.
+  const result = raw.result ?? {};
   return {
     id: String(raw.id),
-    action: raw.action ?? undefined,
-    system: raw.system ?? raw.target_system ?? undefined,
-    status: raw.status ?? raw.state ?? 'unknown',
+    action: raw.action_name ?? raw.action ?? undefined,
+    system: raw.target_system ?? raw.system ?? undefined,
+    status: raw.status ?? 'unknown',
     verified: raw.verified ?? undefined,
-    screenshotId: raw.screenshot_id ?? raw.screenshotId ?? undefined,
-    traceId: raw.trace_id ?? raw.traceId ?? undefined,
-    failureReason: raw.failure_reason ?? raw.failureReason ?? raw.error ?? undefined,
-    warnings: raw.warnings ?? undefined,
+    screenshotId: raw.screenshot_id ?? undefined,
+    traceId: raw.trace_id ?? undefined,
+    failureReason: raw.failure_reason ?? result.failure_reason ?? undefined,
+    warnings: result.warnings ?? undefined,
     createdAt: raw.created_at ?? undefined,
     updatedAt: raw.updated_at ?? undefined,
     history: raw.history ?? undefined,
@@ -421,14 +429,16 @@ export interface AuditFilters {
 }
 
 function normalizeAuditEntry(raw: any): AuditEntry {
+  // Real backend: AuditEntryOut. Columns actor_label / target_system / result /
+  // failure_reason / entry_hash / created_at (hash chain via DB trigger).
   return {
     id: String(raw.id),
-    timestamp: raw.ts ?? raw.timestamp ?? raw.created_at ?? undefined,
-    actor: raw.actor ?? raw.actor_label ?? undefined,
+    timestamp: raw.created_at ?? raw.ts ?? undefined,
+    actor: raw.actor_label ?? raw.actor ?? undefined,
     action: raw.action ?? undefined,
-    system: raw.system ?? raw.target_system ?? undefined,
-    resultSummary: raw.result_summary ?? raw.resultSummary ?? raw.result ?? undefined,
-    entryHash: raw.entry_hash ?? raw.entryHash ?? undefined,
+    system: raw.target_system ?? raw.system ?? undefined,
+    resultSummary: raw.failure_reason ?? raw.result ?? undefined,
+    entryHash: raw.entry_hash ?? undefined,
     raw,
   };
 }
@@ -467,7 +477,8 @@ function normalizePatient(raw: any): Patient {
     dob: raw.dob ?? undefined,
     phone: raw.phone ?? undefined,
     email: raw.email ?? undefined,
-    systemIds: raw.system_ids ?? raw.systemIds ?? undefined,
+    // Real backend exposes per-EMR ids from patient_external_ids as external_ids.
+    systemIds: raw.external_ids ?? raw.system_ids ?? undefined,
     createdAt: raw.created_at ?? undefined,
     raw,
   };

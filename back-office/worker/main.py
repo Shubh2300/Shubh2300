@@ -15,7 +15,13 @@ import os
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from activities import call_bridge, record_outcome, validate_intent, verify_result
+from activities import (
+    call_bridge,
+    mark_run_status,
+    record_outcome,
+    validate_intent,
+    verify_result,
+)
 from workflows import ExecuteActionWorkflow
 
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +43,7 @@ async def main() -> None:
         activities=[
             validate_intent,
             call_bridge,
+            mark_run_status,
             verify_result,
             record_outcome,
         ],

@@ -100,6 +100,13 @@ class ExecuteActionWorkflow:
             )
 
         # 3) verify_result — envelope inspection decides the terminal state.
+        # First advance the run to 'verifying' (executing -> verifying -> terminal).
+        await workflow.execute_activity(
+            "mark_run_status",
+            {"action_run_id": data.action_run_id, "status": "verifying"},
+            start_to_close_timeout=timedelta(seconds=15),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
         outcome = await workflow.execute_activity(
             "verify_result",
             envelope,

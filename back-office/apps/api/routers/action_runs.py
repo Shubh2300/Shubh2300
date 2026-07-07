@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from db import get_connection
 from schemas import ActionRunOut
 
-router = APIRouter(prefix="/action-runs", tags=["action_runs"])
+router = APIRouter(prefix="/action_runs", tags=["action_runs"])
 
 _SELECT = """
     SELECT ar.id, reg.action_name, ar.target_system, ar.risk_level, ar.status,

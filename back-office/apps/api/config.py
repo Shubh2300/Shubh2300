@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     # Per-install pepper for hashing patient identifiers in the audit chain.
     audit_pepper: str | None = Field(default=None, alias="AUDIT_PEPPER")
 
+    # --- Tenancy -------------------------------------------------------------
+    # Single office deployment: one organization. If set, all rows are scoped
+    # to this org id; otherwise the API resolves the single organization row.
+    organization_id: str | None = Field(default=None, alias="ORGANIZATION_ID")
+
     # --- CORS ----------------------------------------------------------------
     # Comma-separated list of allowed origins for the Next.js web app.
     cors_origins: str = Field(

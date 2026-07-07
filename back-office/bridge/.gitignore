@@ -1,0 +1,13 @@
+# Evidence artifacts (screenshots + Playwright traces) may contain PHI — they
+# live ONLY on the office machine and are never committed.
+evidence/
+!evidence/.gitkeep
+
+# Local env / secrets — credentials live ONLY in .env on the office machine.
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/

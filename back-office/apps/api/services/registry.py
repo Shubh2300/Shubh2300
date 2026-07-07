@@ -1,34 +1,24 @@
 """Action Registry loader + ActionIntent validator.
 
-The registry data (``actions.json``) is owned by the action-registry package
-(sibling agent). This module loads it and validates a proposed ActionIntent
-against it. It is deliberately pure logic (no network, no DB) so it can be unit
-tested and reused by the Temporal worker's ``validate_intent`` activity.
+The registry data (``packages/action-registry/actions.json``) and the intent
+shape (``action_intent.schema.json``) are owned by the action-registry sibling.
+This module loads the registry and validates a proposed ActionIntent against it.
+Pure logic (no network, no DB) so it can be unit tested and reused by the
+Temporal worker's ``validate_intent`` activity.
 
-Assumed ``actions.json`` shape (normalizer tolerates a couple of variants):
+Real ``actions.json`` entry (relevant fields):
+    action_name, target_system ('sis'|'svigg'|'both'|'unknown'),
+    risk_level (1..4), requires_approval (bool),
+    required_inputs (list[str], often descriptive), implementation_status
 
-    {
-      "version": "1",
-      "actions": [
-        {
-          "action": "sis.get_patient_demographics",
-          "system": "sis",
-          "endpoint": "/sis/patient/demographics",
-          "method": "POST",
-          "write": false,
-          "description": "...",
-          "required_inputs": ["patient_id"],
-          "optional_inputs": ["as_of"]
-        },
-        ...
-      ]
-    }
+Real ActionIntent (action_intent.schema.json) fields used here:
+    action_name, target_system, risk_level, requires_approval,
+    patient_identifiers, action_inputs, missing_fields (list[str]), reason
 
-Also accepted:
-  * top-level list of action objects,
-  * top-level object keyed by action name,
-  * ``inputs`` as a list of ``{"name": ..., "required": true}`` objects
-    instead of the ``required_inputs`` / ``optional_inputs`` split.
+Completeness is driven by the intent's ``missing_fields`` (the parser computes
+what the request did not supply). For simple/synthetic registries that carry
+clean ``required_inputs`` keys and intents without ``missing_fields``, a
+mechanical fallback diffs required keys against ``action_inputs``.
 """
 
 from __future__ import annotations
@@ -38,16 +28,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+_IMPLEMENTED = "IMPLEMENTED_VENDORED"
+
 
 @dataclass(frozen=True)
 class ActionContract:
-    action: str
-    system: Optional[str]
-    endpoint: Optional[str]
-    method: str
-    write: bool
+    action_name: str
+    target_system: Optional[str]
+    risk_level: Optional[int]
+    requires_approval: bool
     required_inputs: List[str]
-    optional_inputs: List[str]
+    implementation_status: Optional[str]
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -58,55 +49,28 @@ class ValidationResult:
     unknown_action: bool = False
     missing_inputs: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    implemented: bool = True
     contract: Optional[ActionContract] = None
 
 
-def _normalize_inputs(raw: Dict[str, Any]) -> tuple[List[str], List[str]]:
-    """Return (required, optional) input names from a raw contract dict."""
-    required: List[str] = list(raw.get("required_inputs") or [])
-    optional: List[str] = list(raw.get("optional_inputs") or [])
-
-    inputs = raw.get("inputs")
-    if isinstance(inputs, list):
-        for item in inputs:
-            if isinstance(item, str):
-                required.append(item)
-            elif isinstance(item, dict):
-                name = item.get("name")
-                if not name:
-                    continue
-                if item.get("required", False):
-                    required.append(name)
-                else:
-                    optional.append(name)
-    elif isinstance(inputs, dict):
-        for name, spec in inputs.items():
-            is_req = bool(spec.get("required")) if isinstance(spec, dict) else False
-            (required if is_req else optional).append(name)
-
-    # de-dupe, preserve order
-    def _dedupe(xs: List[str]) -> List[str]:
-        seen: set = set()
-        out: List[str] = []
-        for x in xs:
-            if x not in seen:
-                seen.add(x)
-                out.append(x)
-        return out
-
-    return _dedupe(required), _dedupe(optional)
+def _as_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def _to_contract(action_name: str, raw: Dict[str, Any]) -> ActionContract:
-    required, optional = _normalize_inputs(raw)
+def _to_contract(name: str, raw: Dict[str, Any]) -> ActionContract:
+    required = raw.get("required_inputs") or []
+    if not isinstance(required, list):
+        required = []
     return ActionContract(
-        action=raw.get("action") or action_name,
-        system=raw.get("system"),
-        endpoint=raw.get("endpoint") or raw.get("path"),
-        method=str(raw.get("method") or "POST").upper(),
-        write=bool(raw.get("write", False)),
-        required_inputs=required,
-        optional_inputs=optional,
+        action_name=raw.get("action_name") or raw.get("action") or name,
+        target_system=raw.get("target_system") or raw.get("system"),
+        risk_level=_as_int(raw.get("risk_level")),
+        requires_approval=bool(raw.get("requires_approval", False)),
+        required_inputs=[str(x) for x in required],
+        implementation_status=raw.get("implementation_status"),
         raw=raw,
     )
 
@@ -119,87 +83,90 @@ class ActionRegistry:
 
     @classmethod
     def from_data(cls, data: Any) -> "ActionRegistry":
-        contracts: Dict[str, ActionContract] = {}
-
         if isinstance(data, dict) and "actions" in data:
             actions = data["actions"]
         else:
             actions = data
 
+        contracts: Dict[str, ActionContract] = {}
         if isinstance(actions, list):
             for raw in actions:
                 if not isinstance(raw, dict):
                     continue
-                name = raw.get("action") or raw.get("name")
-                if not name:
-                    continue
-                contracts[name] = _to_contract(name, raw)
+                name = raw.get("action_name") or raw.get("action") or raw.get("name")
+                if name:
+                    contracts[name] = _to_contract(name, raw)
         elif isinstance(actions, dict):
             for name, raw in actions.items():
                 if isinstance(raw, dict):
                     contracts[name] = _to_contract(name, raw)
-
         return cls(contracts)
 
     @classmethod
     def load(cls, path: str | Path) -> "ActionRegistry":
-        text = Path(path).read_text(encoding="utf-8")
-        return cls.from_data(json.loads(text))
+        return cls.from_data(json.loads(Path(path).read_text(encoding="utf-8")))
 
-    def get(self, action: str) -> Optional[ActionContract]:
-        return self._contracts.get(action)
+    def get(self, action_name: str) -> Optional[ActionContract]:
+        return self._contracts.get(action_name)
 
     def actions(self) -> List[str]:
         return sorted(self._contracts.keys())
 
+    @staticmethod
+    def _systems_compatible(intent_system: Optional[str], contract_system: Optional[str]) -> bool:
+        if not intent_system or not contract_system:
+            return True
+        if intent_system in ("both", "unknown") or contract_system == "both":
+            return True
+        return intent_system == contract_system
+
     def validate(self, intent: Dict[str, Any]) -> ValidationResult:
-        """Validate a proposed intent (as a plain dict) against the registry."""
-        action = intent.get("action")
-        if not action:
+        """Validate a proposed intent (plain dict) against the registry."""
+        action_name = intent.get("action_name") or intent.get("action")
+        if not action_name:
             return ValidationResult(
                 ok=False,
                 status="rejected",
-                errors=["intent is missing an 'action'"],
+                errors=["intent is missing an 'action_name'"],
             )
 
-        contract = self._contracts.get(action)
+        contract = self._contracts.get(action_name)
         if contract is None:
             return ValidationResult(
                 ok=False,
                 status="rejected",
                 unknown_action=True,
-                errors=[f"unknown action '{action}' is not in the registry"],
+                errors=[f"unknown action '{action_name}' is not in the registry"],
             )
-
-        provided = intent.get("inputs") or {}
-        if not isinstance(provided, dict):
-            return ValidationResult(
-                ok=False,
-                status="rejected",
-                errors=["'inputs' must be an object"],
-                contract=contract,
-            )
-
-        missing = [
-            name
-            for name in contract.required_inputs
-            if provided.get(name) in (None, "")
-        ]
 
         errors: List[str] = []
-        # If the registry declares a system for the action and the intent also
-        # declares one, they must agree.
-        intent_system = intent.get("system")
-        if contract.system and intent_system and intent_system != contract.system:
+
+        intent_system = intent.get("target_system") or intent.get("system")
+        if not self._systems_compatible(intent_system, contract.target_system):
             errors.append(
-                f"intent system '{intent_system}' does not match "
-                f"registry system '{contract.system}' for action '{action}'"
+                f"intent target_system '{intent_system}' is incompatible with "
+                f"registry target_system '{contract.target_system}' for "
+                f"'{action_name}'"
             )
 
+        # Completeness: prefer the parser-computed missing_fields; fall back to
+        # a mechanical diff for simple registries/intents that lack it.
+        missing_fields = intent.get("missing_fields")
+        if missing_fields is not None:
+            missing = [str(x) for x in missing_fields]
+        else:
+            provided = intent.get("action_inputs") or intent.get("inputs") or {}
+            provided = provided if isinstance(provided, dict) else {}
+            missing = [
+                name
+                for name in contract.required_inputs
+                if provided.get(name) in (None, "")
+            ]
+
         if missing:
-            errors.append(
-                "missing required inputs: " + ", ".join(missing)
-            )
+            errors.append("missing required inputs: " + ", ".join(missing))
+
+        implemented = contract.implementation_status in (None, _IMPLEMENTED)
 
         ok = not missing and not errors
         return ValidationResult(
@@ -207,5 +174,6 @@ class ActionRegistry:
             status="accepted" if ok else "rejected",
             missing_inputs=missing,
             errors=errors,
+            implemented=implemented,
             contract=contract,
         )

@@ -30,12 +30,16 @@ async def start_execute_action_workflow(
     approval_id: str,
     action_run_id: str,
     intent: Dict[str, Any],
+    approval_token: Optional[str] = None,
     client: Optional[Client] = None,
 ) -> Tuple[str, Optional[str]]:
     """Start ExecuteActionWorkflow. Returns (temporal_workflow_id, run_id).
 
     ``workflow_id`` is the workflow_runs UUID — deterministic and unique, so a
     duplicate start for the same run is rejected by Temporal (idempotent).
+
+    ``approval_token`` is the single-use raw token (its hash is stored on the
+    approval row); the worker attaches it to write requests to the bridge.
     """
     client = client or await get_client(address, namespace)
     handle = await client.start_workflow(
@@ -45,6 +49,7 @@ async def start_execute_action_workflow(
                 "approval_id": approval_id,
                 "action_run_id": action_run_id,
                 "intent": intent,
+                "approval_token": approval_token,
             }
         ],
         id=workflow_id,

@@ -55,8 +55,9 @@ def parse_intent(payload: ParseRequest) -> ParseResponse:
         unknown_action=result.unknown_action,
         missing_inputs=result.missing_inputs,
         errors=result.errors,
+        implemented=result.implemented,
     )
     logger.info(
-        "intent.parsed action=%s ok=%s", intent.action, validation.ok
+        "intent.parsed action=%s ok=%s", intent.action_name, validation.ok
     )
     return ParseResponse(intent=intent, validation=validation)

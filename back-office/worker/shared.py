@@ -15,6 +15,9 @@ class ExecuteActionInput:
     approval_id: str
     action_run_id: str
     intent: Dict[str, Any]
+    # Single-use token minted at human-approval time; required for writes
+    # (risk_level >= 2). None for reads.
+    approval_token: Optional[str] = None
 
 
 @dataclass

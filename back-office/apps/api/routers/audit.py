@@ -1,11 +1,11 @@
 """Audit router — read-only listing of the append-only, hash-chained log.
 
-Writes go only through services/audit.py::AuditWriter. This router never
-mutates the log. No PHI is returned: patient identifiers are stored hashed.
+Writes go only through services/audit.py::AuditWriter (and the DB trigger that
+computes the hash chain). This router never mutates the log. No PHI is
+returned: only identifiers-used are stored, and this listing omits them.
 
-Assumed ``audit_logs`` table (owned by db/schema.sql):
-    id, ts, actor, action, intent, result_summary,
-    target_patient_id_hash, prev_hash, entry_hash
+audit_logs columns: id, actor_label, action, target_system, result,
+failure_reason, prev_hash, entry_hash, created_at, ...
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ def list_audit(limit: int = 100, offset: int = 0) -> List[AuditEntryOut]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, ts, actor, action, intent, result_summary,
-                       prev_hash, entry_hash
+                SELECT id, actor_label, action, target_system, result,
+                       failure_reason, prev_hash, entry_hash, created_at
                 FROM audit_logs
                 ORDER BY id DESC
                 LIMIT %s OFFSET %s

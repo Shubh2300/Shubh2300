@@ -18,8 +18,6 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Dict, List, Optional
 
-from psycopg.types.json import Json
-
 GENESIS_PREV_HASH = "0" * 64
 
 # Field order MUST match audit_logs_hash_chain() in db/schema.sql exactly.
@@ -100,6 +98,8 @@ class AuditWriter:
         patient_identifiers_used: Optional[Dict[str, Any]] = None,
         failure_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
+        from psycopg.types.json import Json
+
         with self._conn_factory() as conn:
             with conn.cursor() as cur:
                 cur.execute(

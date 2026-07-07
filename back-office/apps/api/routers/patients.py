@@ -1,13 +1,11 @@
-"""Patients router — internal workflow-layer patient records (list/detail).
+"""Patients router — internal workflow-layer patient index (list/detail).
 
-These are the platform's OWN patient index (decision #4: the platform builds
-its own database; old patient DBs are not imported). They are the records the
-workflow layer resolves against; they are not a copy of either EMR.
+The platform's OWN minimal demographic index (decision #4). Full charts live in
+the EMRs, not here. External EMR identifiers live in patient_external_ids.
 
-Assumed ``patients`` table (owned by db/schema.sql):
-    id (uuid/text pk), first_name, last_name, dob (date/text),
-    system_ids (jsonb: {"sis": "...", "svigg": "..."}),
-    created_at (timestamptz)
+patients columns: id, organization_id, first_name, last_name, dob, phone,
+email, is_test_patient, created_at, updated_at.
+patient_external_ids: patient_id, emr_system_id, external_id, external_id_kind.
 """
 
 from __future__ import annotations
@@ -21,14 +19,42 @@ from schemas import PatientOut
 
 router = APIRouter(prefix="/patients", tags=["patients"])
 
+_SELECT = """
+    SELECT id, first_name, last_name, dob, phone, email, is_test_patient,
+           created_at
+    FROM patients
+"""
 
-def _to_out(row: dict) -> PatientOut:
+
+def _external_ids(cur, patient_id: str) -> dict:
+    cur.execute(
+        """
+        SELECT s.system_key AS system_code, x.external_id, x.external_id_kind
+        FROM patient_external_ids x
+        JOIN emr_systems s ON s.id = x.emr_system_id
+        WHERE x.patient_id = %s
+        """,
+        (patient_id,),
+    )
+    out: dict = {}
+    for r in cur.fetchall():
+        key = r["system_code"]
+        if r["external_id_kind"] and r["external_id_kind"] != "primary":
+            key = f"{key}:{r['external_id_kind']}"
+        out[key] = r["external_id"]
+    return out
+
+
+def _to_out(row: dict, external_ids: dict) -> PatientOut:
     return PatientOut(
         id=row["id"],
         first_name=row.get("first_name"),
         last_name=row.get("last_name"),
         dob=str(row["dob"]) if row.get("dob") is not None else None,
-        system_ids=row.get("system_ids") or {},
+        phone=row.get("phone"),
+        email=row.get("email"),
+        is_test_patient=row.get("is_test_patient", False),
+        external_ids=external_ids,
         created_at=row["created_at"],
     )
 
@@ -38,29 +64,19 @@ def list_patients(limit: int = 100) -> List[PatientOut]:
     limit = max(1, min(limit, 500))
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, first_name, last_name, dob, system_ids, created_at
-                FROM patients ORDER BY created_at DESC LIMIT %s
-                """,
-                (limit,),
-            )
+            cur.execute(_SELECT + " ORDER BY created_at DESC LIMIT %s", (limit,))
             rows = cur.fetchall()
-    return [_to_out(r) for r in rows]
+            result = [_to_out(r, _external_ids(cur, r["id"])) for r in rows]
+    return result
 
 
 @router.get("/{patient_id}", response_model=PatientOut)
 def get_patient(patient_id: str) -> PatientOut:
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT id, first_name, last_name, dob, system_ids, created_at
-                FROM patients WHERE id = %s
-                """,
-                (patient_id,),
-            )
+            cur.execute(_SELECT + " WHERE id = %s", (patient_id,))
             row = cur.fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="patient not found")
-    return _to_out(row)
+            if row is None:
+                raise HTTPException(status_code=404, detail="patient not found")
+            ext = _external_ids(cur, patient_id)
+    return _to_out(row, ext)

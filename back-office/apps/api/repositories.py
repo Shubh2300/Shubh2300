@@ -157,6 +157,18 @@ def list_pending_approvals() -> List[dict]:
     return [_approval_row(r) for r in rows]
 
 
+def list_approvals(limit: int = 200) -> List[dict]:
+    """All approvals (newest first) for the shared queue + history views."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                _APPROVAL_SELECT + " ORDER BY a.created_at DESC LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return [_approval_row(r) for r in rows]
+
+
 def get_approval(approval_id: str) -> Optional[dict]:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -165,9 +177,14 @@ def get_approval(approval_id: str) -> Optional[dict]:
     return _approval_row(row) if row else None
 
 
-def approve_approval(approval_id: str, approver_id: Optional[str]) -> Optional[dict]:
-    """Set approval -> approved and its run -> approved. Returns None if the
-    approval is missing; raises ValueError if not pending."""
+def approve_approval(
+    approval_id: str,
+    approver_id: Optional[str],
+    approval_token_hash: Optional[str] = None,
+) -> Optional[dict]:
+    """Set approval -> approved and its run -> approved. Records the single-use
+    approval token hash so a downstream write can be gate-checked. Returns None
+    if the approval is missing; raises ValueError if not pending."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -183,10 +200,11 @@ def approve_approval(approval_id: str, approver_id: Optional[str]) -> Optional[d
             cur.execute(
                 """
                 UPDATE approvals
-                SET status = 'approved', approver_id = %s, decided_at = now()
+                SET status = 'approved', approver_id = %s,
+                    approval_token_hash = %s, decided_at = now()
                 WHERE id = %s
                 """,
-                (approver_id, approval_id),
+                (approver_id, approval_token_hash, approval_id),
             )
             cur.execute(
                 "UPDATE action_runs SET status = 'approved' WHERE id = %s",

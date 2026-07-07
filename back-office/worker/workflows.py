@@ -49,7 +49,7 @@ class ExecuteActionWorkflow:
     @workflow.run
     async def run(self, arg: dict) -> dict:
         data = ExecuteActionInput(**arg)
-        action = data.intent.get("action", "unknown")
+        action = data.intent.get("action_name") or data.intent.get("action", "unknown")
 
         # 1) validate_intent — reject unknown/incomplete intents into review.
         try:
@@ -66,12 +66,25 @@ class ExecuteActionWorkflow:
 
         is_write = bool(validated.get("write", False))
 
+        # Approval-required gate (risk_level >= 2): a write MUST carry the
+        # single-use approval token minted at human-approval time. Without it we
+        # NEVER call a write endpoint — route straight to human review. This is
+        # the code-level enforcement of the "no unapproved write" invariant
+        # (the bridge also re-checks the token before dispatching).
+        payload = dict(validated["payload"])
+        if is_write:
+            if not data.approval_token:
+                return await self._to_review(
+                    data, action, "blocked: write requires an approval token"
+                )
+            payload["approval_token"] = data.approval_token
+
         # 2) call_bridge — reads may retry on network errors; writes never do.
         call_input = {
             "endpoint": validated["endpoint"],
             "method": validated["method"],
             "write": is_write,
-            "payload": validated["inputs"],
+            "payload": payload,
         }
         try:
             envelope = await workflow.execute_activity(

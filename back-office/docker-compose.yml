@@ -1,0 +1,129 @@
+# Back Office — single office-machine deployment.
+#
+# Everything runs on ONE box inside the office network (decision #9): Postgres,
+# Temporal, the API, the worker, and the Next.js web app.
+#
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ THE EMR BRIDGE IS NOT IN THIS FILE — IT RUNS ON THE HOST, NOT A CONTAINER.│
+# │ The bridge holds a persistent, logged-in REAL browser session to the EMRs │
+# │ (SIS + Svigg); that session cannot live in an ephemeral container. Start  │
+# │ it directly on the host machine, listening on :8600. Containers reach it  │
+# │ via host.docker.internal (wired below through extra_hosts + BRIDGE_URL).  │
+# └──────────────────────────────────────────────────────────────────────────┘
+#
+# Secrets (OPENAI_API_KEY, AUDIT_PEPPER, …) come from a .env file next to this
+# compose file — NEVER committed. See .env.example for the variable names.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-backoffice}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # db/schema.sql is owned by the schema sibling agent; it initializes the
+      # 20 back-office tables on first boot (runs only on an empty volume).
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Temporal server (auto-setup creates the temporal + visibility databases in
+  # the same Postgres instance on first boot).
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12          # driver name; compatible with Postgres 16
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "7233:7233"
+    healthcheck:
+      test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  temporal-ui:
+    image: temporalio/ui:2.32.0
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8080:8080"
+
+  api:
+    build:
+      context: ./apps/api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-backoffice}
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-emr-actions}
+      BRIDGE_URL: ${BRIDGE_URL:-http://host.docker.internal:8600}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_PARSER_MODEL: ${OPENAI_PARSER_MODEL:-gpt-4o-mini}
+      ACTION_REGISTRY_PATH: /app/packages/action-registry/actions.json
+      ACTION_INTENT_SCHEMA_PATH: /app/packages/action-registry/action_intent.schema.json
+      AUDIT_PEPPER: ${AUDIT_PEPPER:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    volumes:
+      # action-registry package (owned by a sibling agent), read-only.
+      - ./packages:/app/packages:ro
+    extra_hosts:
+      # Lets the container resolve the host-run bridge at host.docker.internal.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: ./worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-backoffice}
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-emr-actions}
+      BRIDGE_URL: ${BRIDGE_URL:-http://host.docker.internal:8600}
+      ACTION_REGISTRY_PATH: /app/packages/action-registry/actions.json
+    volumes:
+      - ./packages:/app/packages:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  web:
+    # Next.js dashboard (owned by the web sibling agent). Talks to the API.
+    build:
+      context: ./apps/web
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:

@@ -1,0 +1,1355 @@
+{
+  "$schema_note": "One entry per approved Action-Registry action. implementation_status is IMPLEMENTED_VENDORED only where a vendored scraper (bridge/integrations/*) genuinely implements it; everything else is BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS. No action fabricates EMR data.",
+  "intent_schema": "action_intent.schema.json",
+  "standard_output_schema": "bridge.models.BridgeResponse",
+  "verification_policy": {
+    "strong_match": "emr_id | dob+exact_name | dob+phone",
+    "weak_match_halts": true
+  },
+  "actions": [
+    {
+      "action_name": "find_patient",
+      "target_system": "both",
+      "risk_level": 1,
+      "requires_approval": false,
+      "required_inputs": [
+        "query (name and/or dob and/or phone and/or emr_id)"
+      ],
+      "preconditions": [
+        "EMR session authenticated for the target system(s)."
+      ],
+      "execution_steps": [
+        "Normalize the query (comma and bare two-token name orders).",
+        "SIS: SISClient.search_patient(query) via the authenticated REST-over-Playwright path.",
+        "Svigg: SviggScraper.search_patient(last_name, first_name).",
+        "Return candidate list with the identifiers each row exposes."
+      ],
+      "selectors_needed": [
+        "sis: REST /patient search (no DOM selector)",
+        "svigg: patient search form + results grid rows"
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "One or more candidate rows returned from the live EMR (or an honest empty list).",
+      "failure_modes": [
+        "session_expired",
+        "ambiguous_name (2+ distinct matches)",
+        "emr_unreachable"
+      ],
+      "retry_behavior": "retry once on transient session_expired after re-login; no retry on ambiguous.",
+      "approval_requirements": "none (read).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "read is its own verification; return source + as_of timestamp.",
+        "screenshot_proof": "optional for reads; captured for write-adjacent reads.",
+        "only_success_if": "data returned from the live EMR (never synthesized)."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "IMPLEMENTED_VENDORED",
+      "implemented_by": {
+        "sis": "SISClient.search_patient",
+        "svigg": "SviggScraper.search_patient"
+      }
+    },
+    {
+      "action_name": "get_patient_demographics",
+      "target_system": "both",
+      "risk_level": 1,
+      "requires_approval": false,
+      "required_inputs": [
+        "emr_id (SIS patient_id) OR svigg (last_name+first_name / acct+rowid)"
+      ],
+      "preconditions": [
+        "Patient resolved to a strong identifier."
+      ],
+      "execution_steps": [
+        "SIS: SISClient.get_patient_demographics(patient_id).",
+        "Svigg: SviggScraper.get_patient_summary(rowid, acct) / search_and_summarize."
+      ],
+      "selectors_needed": [
+        "sis: REST demographics endpoint",
+        "svigg: patient summary page text parse"
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "Demographics dict returned from the live EMR.",
+      "failure_modes": [
+        "patient_not_found",
+        "session_expired"
+      ],
+      "retry_behavior": "retry once after re-login on session_expired.",
+      "approval_requirements": "none (read).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "read is its own verification; return source + as_of timestamp.",
+        "screenshot_proof": "optional for reads; captured for write-adjacent reads.",
+        "only_success_if": "data returned from the live EMR (never synthesized)."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "IMPLEMENTED_VENDORED",
+      "implemented_by": {
+        "sis": "SISClient.get_patient_demographics",
+        "svigg": "SviggScraper.get_patient_summary"
+      }
+    },
+    {
+      "action_name": "get_upcoming_appointments",
+      "target_system": "both",
+      "risk_level": 1,
+      "requires_approval": false,
+      "required_inputs": [
+        "date or date-range (optional) | patient acct (svigg, optional)"
+      ],
+      "preconditions": [
+        "EMR session authenticated."
+      ],
+      "execution_steps": [
+        "SIS: SISClient.get_schedule_day/week/range for provider schedule.",
+        "Svigg: SviggScraper.get_patient_appointments(acct) or get_appointment_calendar(date)."
+      ],
+      "selectors_needed": [
+        "sis: REST schedule endpoint",
+        "svigg: calfilt grid parse"
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "Appointment list returned from the live EMR.",
+      "failure_modes": [
+        "session_expired",
+        "date_filter_fallback_to_today (svigg)"
+      ],
+      "retry_behavior": "re-read with an explicit date guard if svigg falls back to today.",
+      "approval_requirements": "none (read).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "read is its own verification; return source + as_of timestamp.",
+        "screenshot_proof": "optional for reads; captured for write-adjacent reads.",
+        "only_success_if": "data returned from the live EMR (never synthesized)."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "IMPLEMENTED_VENDORED",
+      "implemented_by": {
+        "sis": "SISClient.get_schedule_day",
+        "svigg": "SviggScraper.get_patient_appointments / get_appointment_calendar"
+      }
+    },
+    {
+      "action_name": "get_referral_status",
+      "target_system": "both",
+      "risk_level": 1,
+      "requires_approval": false,
+      "required_inputs": [
+        "patient identifier",
+        "referral identifier (if known)"
+      ],
+      "preconditions": [
+        "A verified referral-status screen/endpoint mapped in the EMR."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 no verified referral-status endpoint or selector exists in the vendored SIS/Svigg clients."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real referral-status screen selectors not yet mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "Referral status returned from the live EMR.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "none (read).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "read is its own verification; return source + as_of timestamp.",
+        "screenshot_proof": "optional for reads; captured for write-adjacent reads.",
+        "only_success_if": "data returned from the live EMR (never synthesized)."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No referral-status read exists in sis_client.py or svigg_scraper.py.",
+      "needed_from_user": [
+        "Real EMR screen/endpoint for referral status",
+        "DOM selectors or REST route for the referral record"
+      ]
+    },
+    {
+      "action_name": "get_documents",
+      "target_system": "both",
+      "risk_level": 1,
+      "requires_approval": false,
+      "required_inputs": [
+        "patient identifier"
+      ],
+      "preconditions": [
+        "A verified document-list screen/endpoint mapped in the EMR."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 no document-listing endpoint/selector in the vendored clients."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 document repository selectors not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "Document list returned from the live EMR.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "none (read).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "read is its own verification; return source + as_of timestamp.",
+        "screenshot_proof": "optional for reads; captured for write-adjacent reads.",
+        "only_success_if": "data returned from the live EMR (never synthesized)."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No document-listing method in sis_client.py or svigg_scraper.py.",
+      "needed_from_user": [
+        "Real document-repository screen/endpoint",
+        "selectors or REST route"
+      ]
+    },
+    {
+      "action_name": "retrieve_notes",
+      "target_system": "sis",
+      "risk_level": 1,
+      "requires_approval": false,
+      "required_inputs": [
+        "emr_id (SIS patient_id)"
+      ],
+      "preconditions": [
+        "Patient resolved to a SIS patient_id."
+      ],
+      "execution_steps": [
+        "SIS: SISClient.get_patient_notes(patient_id) \u2014 returns the note list."
+      ],
+      "selectors_needed": [
+        "sis: REST notes endpoint"
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "Note list returned from the live EMR.",
+      "failure_modes": [
+        "patient_not_found",
+        "session_expired"
+      ],
+      "retry_behavior": "retry once after re-login on session_expired.",
+      "approval_requirements": "none (read).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "read is its own verification; return source + as_of timestamp.",
+        "screenshot_proof": "optional for reads; captured for write-adjacent reads.",
+        "only_success_if": "data returned from the live EMR (never synthesized)."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "IMPLEMENTED_VENDORED",
+      "implemented_by": {
+        "sis": "SISClient.get_patient_notes"
+      }
+    },
+    {
+      "action_name": "get_recent_activity",
+      "target_system": "both",
+      "risk_level": 1,
+      "requires_approval": false,
+      "required_inputs": [
+        "patient identifier"
+      ],
+      "preconditions": [
+        "A verified per-patient activity/audit view mapped in the EMR."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 no dedicated recent-activity endpoint exists. (SIS exposes dates_of_service/ledger, but not a unified activity feed; surfacing that as 'recent activity' would be a fabricated mapping.)"
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 unified activity view not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "Activity feed returned from the live EMR.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "none (read).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "read is its own verification; return source + as_of timestamp.",
+        "screenshot_proof": "optional for reads; captured for write-adjacent reads.",
+        "only_success_if": "data returned from the live EMR (never synthesized)."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No unified recent-activity read in the vendored clients.",
+      "needed_from_user": [
+        "Definition of 'recent activity' the office expects",
+        "Real EMR view/endpoint backing it"
+      ]
+    },
+    {
+      "action_name": "book_appointment",
+      "target_system": "svigg",
+      "risk_level": 2,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient acct",
+        "date (MM/DD/YYYY)",
+        "time",
+        "provider",
+        "office",
+        "cpt00 (REQUIRED)",
+        "duration_minutes"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "acct in SVIGG_BOOKING_ALLOWLIST (test acct by default).",
+        "approval token present (risk>=2)."
+      ],
+      "execution_steps": [
+        "Navigate calfilt to the target date (date-guarded).",
+        "Click the target grid cell to stage the slot server-side.",
+        "Fill cpt00 (REQUIRED \u2014 blank => silent 200 bounce), Duration00, note00.",
+        "POST bk_p with a FRESH parsed TFORMCOUNT; Submit=Submit (or Overbook on full slot).",
+        "Detect bounce (HTTP 200 + re-rendered form) vs accept (HTTP 302).",
+        "Date-guarded grid re-read to confirm the patient is on the target date."
+      ],
+      "selectors_needed": [
+        "svigg: calfilt grid cell (x/y slot)",
+        "bk_p form fields (cpt00, Duration00, note00, Submit)"
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "submitted_verified \u2014 a date-guarded grid re-read finds the patient on the target date.",
+      "failure_modes": [
+        "validation_bounced (blank cpt00)",
+        "slot_full",
+        "session_expired",
+        "stale_TFORMCOUNT",
+        "name_order_intolerance (D6)"
+      ],
+      "retry_behavior": "on slot_full re-post with Submit=Overbook + Duration00; never re-POST with a stale TFORMCOUNT; never trust 'submitted' without a verified re-read.",
+      "approval_requirements": "human approval required; single-use approval token checked at the POST site; acct allowlist enforced.",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "IMPLEMENTED_VENDORED",
+      "implemented_by": {
+        "svigg": "SviggScraper.book_appointment (triple-gated; verify per SVIGG_SCHEDULING_CONTRACT.md)"
+      }
+    },
+    {
+      "action_name": "cancel_appointment",
+      "target_system": "svigg",
+      "risk_level": 2,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient acct",
+        "last_name",
+        "encounter_id (enc) preferred OR grid slot"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "acct+last_name bound in CANCEL_ALLOWED_ACCT_NAMES.",
+        "approval token present (risk>=2)."
+      ],
+      "execution_steps": [
+        "Prefer the encounter-keyed path: resched.htm?enc -> resched_p (Delete) -> cancel2_p (CancelReason+Yes).",
+        "Fallback grid path: mre -> mre_p (Delete) -> cancel_p (CancelReason+Yes), parsing TFORMCOUNT fresh each step.",
+        "Date-guarded post-cancel grid re-read: assert the patient's row is gone on the real date."
+      ],
+      "selectors_needed": [
+        "svigg: resched/resched_p/cancel2_p (enc path)",
+        "mre/mre_p/cancel_p (grid path)",
+        "TFORMCOUNT field"
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "cancelled_verified \u2014 a date-guarded re-read confirms the appointment is gone.",
+      "failure_modes": [
+        "cancel_submitted_unverified (date guard could not apply)",
+        "stale_frame (D1)",
+        "ambiguous cell (D2)",
+        "No=No / missing Yes"
+      ],
+      "retry_behavior": "never compute TFORMCOUNT (parse fresh); if unverifiable, return cancel_unconfirmed honestly, never success.",
+      "approval_requirements": "human approval required; single-use token at the destructive step; acct+last_name binding enforced.",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "IMPLEMENTED_VENDORED",
+      "implemented_by": {
+        "svigg": "SviggScraper.cancel_appointment (grid path implemented; enc path/date-guard hardening in svigg_reliability_fix.py, MERGE PENDING)"
+      }
+    },
+    {
+      "action_name": "reschedule_appointment",
+      "target_system": "svigg",
+      "risk_level": 2,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient acct",
+        "encounter_id (enc)"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=2).",
+        "A verified selector/wire contract for this operation."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No reschedule method exists; only cancel/book are implemented. The resched.htm flow in svigg_reliability_fix.py is a cancel-by-enc helper, not a full move."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real selectors/wire contract for this operation not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the change.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human approval required (risk>=2).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No reschedule method exists; only cancel/book are implemented. The resched.htm flow in svigg_reliability_fix.py is a cancel-by-enc helper, not a full move.",
+      "needed_from_user": [
+        "Real EMR screen + HAR-derived wire contract",
+        "DOM selectors",
+        "test-acct verification"
+      ]
+    },
+    {
+      "action_name": "confirm_appointment",
+      "target_system": "svigg",
+      "risk_level": 2,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient acct",
+        "encounter_id (enc)"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=2).",
+        "A verified selector/wire contract for this operation."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No appointment-confirm method in the vendored clients."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real selectors/wire contract for this operation not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the change.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human approval required (risk>=2).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No appointment-confirm method in the vendored clients.",
+      "needed_from_user": [
+        "Real EMR screen + HAR-derived wire contract",
+        "DOM selectors",
+        "test-acct verification"
+      ]
+    },
+    {
+      "action_name": "mark_no_show",
+      "target_system": "svigg",
+      "risk_level": 2,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient acct",
+        "encounter_id (enc)"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=2).",
+        "A verified selector/wire contract for this operation."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No no-show method in the vendored clients."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real selectors/wire contract for this operation not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the change.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human approval required (risk>=2).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No no-show method in the vendored clients.",
+      "needed_from_user": [
+        "Real EMR screen + HAR-derived wire contract",
+        "DOM selectors",
+        "test-acct verification"
+      ]
+    },
+    {
+      "action_name": "add_appointment_note",
+      "target_system": "svigg",
+      "risk_level": 2,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient acct",
+        "encounter_id (enc)"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=2).",
+        "A verified selector/wire contract for this operation."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No standalone appointment-note write; note fields exist only inside book/mre forms, not exposed as an action."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real selectors/wire contract for this operation not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the change.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human approval required (risk>=2).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No standalone appointment-note write; note fields exist only inside book/mre forms, not exposed as an action.",
+      "needed_from_user": [
+        "Real EMR screen + HAR-derived wire contract",
+        "DOM selectors",
+        "test-acct verification"
+      ]
+    },
+    {
+      "action_name": "create_new_patient",
+      "target_system": "svigg",
+      "risk_level": 3,
+      "requires_approval": true,
+      "required_inputs": [
+        "demographics {last_name, first_name, ...}"
+      ],
+      "preconditions": [
+        "De-dupe search run first (idempotency).",
+        "approval token present (risk>=3).",
+        "SVIGG_CREATE_EXECUTE + confirm_unverified for any real Save."
+      ],
+      "execution_steps": [
+        "Open patientEntry_new.htm; run the name-search de-dupe (read-only).",
+        "If an existing chart matches name+dob -> STOP, report duplicate_suspected.",
+        "Open patientEntry_add.htm; DISCOVER add-form fields from the DOM; map demographics.",
+        "dry_run (DEFAULT): return would_submit payload; commit NOTHING.",
+        "commit (gated): fail-closed Save; tag response unverified (Save POST contract not in HAR)."
+      ],
+      "selectors_needed": [
+        "svigg: patientEntry_new.htm / patientEntry_add.htm form fields (discovered at runtime)"
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "dry_run: discovered fields + would_submit returned. commit: a re-read finds the new chart (currently returns save_unverified \u2014 fail-closed).",
+      "failure_modes": [
+        "duplicate_suspected",
+        "save_unverified (Save contract unverified)",
+        "session_expired"
+      ],
+      "retry_behavior": "never double-create (de-dupe gate); commit stays fail-closed until the Save POST is HAR-verified.",
+      "approval_requirements": "human approval required; create allowlist + explicit confirm_unverified.",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "IMPLEMENTED_VENDORED",
+      "implemented_by": {
+        "svigg": "SviggScraper.create_patient (dry-run discovery IMPLEMENTED; commit path gated + unverified)"
+      }
+    },
+    {
+      "action_name": "update_patient_demographics",
+      "target_system": "both",
+      "risk_level": 3,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient identifier",
+        "field payload"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=3).",
+        "A verified write selector/wire contract."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No demographic-update write in the vendored clients (SIS is read-only; Svigg has create only)."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real write selectors/wire contract not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the change.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human approval required (risk>=3).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No demographic-update write in the vendored clients (SIS is read-only; Svigg has create only).",
+      "needed_from_user": [
+        "Real EMR write screen + HAR-derived wire contract",
+        "DOM selectors",
+        "test-acct verification"
+      ]
+    },
+    {
+      "action_name": "add_insurance_info",
+      "target_system": "both",
+      "risk_level": 3,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient identifier",
+        "field payload"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=3).",
+        "A verified write selector/wire contract."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 SIS exposes get_patient_insurance (read) only; no insurance write path exists."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real write selectors/wire contract not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the change.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human approval required (risk>=3).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "SIS exposes get_patient_insurance (read) only; no insurance write path exists.",
+      "needed_from_user": [
+        "Real EMR write screen + HAR-derived wire contract",
+        "DOM selectors",
+        "test-acct verification"
+      ]
+    },
+    {
+      "action_name": "add_referring_provider",
+      "target_system": "both",
+      "risk_level": 3,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient identifier",
+        "field payload"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=3).",
+        "A verified write selector/wire contract."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No referring-provider write in the vendored clients."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real write selectors/wire contract not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the change.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human approval required (risk>=3).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No referring-provider write in the vendored clients.",
+      "needed_from_user": [
+        "Real EMR write screen + HAR-derived wire contract",
+        "DOM selectors",
+        "test-acct verification"
+      ]
+    },
+    {
+      "action_name": "upload_patient_document",
+      "target_system": "both",
+      "risk_level": 3,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient identifier",
+        "field payload"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=3).",
+        "A verified write selector/wire contract."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No document-upload path in the vendored clients."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real write selectors/wire contract not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the change.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human approval required (risk>=3).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No document-upload path in the vendored clients.",
+      "needed_from_user": [
+        "Real EMR write screen + HAR-derived wire contract",
+        "DOM selectors",
+        "test-acct verification"
+      ]
+    },
+    {
+      "action_name": "link_referral_to_patient",
+      "target_system": "both",
+      "risk_level": 3,
+      "requires_approval": true,
+      "required_inputs": [
+        "patient identifier",
+        "field payload"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=3).",
+        "A verified write selector/wire contract."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No referral-linking write in the vendored clients."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real write selectors/wire contract not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the change.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human approval required (risk>=3).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No referral-linking write in the vendored clients.",
+      "needed_from_user": [
+        "Real EMR write screen + HAR-derived wire contract",
+        "DOM selectors",
+        "test-acct verification"
+      ]
+    },
+    {
+      "action_name": "retrieve_note",
+      "target_system": "sis",
+      "risk_level": 4,
+      "requires_approval": false,
+      "required_inputs": [
+        "emr_id (SIS patient_id)",
+        "note_id (optional to select one)"
+      ],
+      "preconditions": [
+        "Patient resolved to a SIS patient_id."
+      ],
+      "execution_steps": [
+        "SIS: SISClient.get_patient_notes(patient_id); select the requested note."
+      ],
+      "selectors_needed": [
+        "sis: REST notes endpoint"
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "Note content returned from the live EMR.",
+      "failure_modes": [
+        "note_not_found",
+        "session_expired"
+      ],
+      "retry_behavior": "retry once after re-login on session_expired.",
+      "approval_requirements": "none (read).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "read is its own verification; return source + as_of timestamp.",
+        "screenshot_proof": "optional for reads; captured for write-adjacent reads.",
+        "only_success_if": "data returned from the live EMR (never synthesized)."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "IMPLEMENTED_VENDORED",
+      "implemented_by": {
+        "sis": "SISClient.get_patient_notes"
+      }
+    },
+    {
+      "action_name": "create_note_draft",
+      "target_system": "sis",
+      "risk_level": 4,
+      "requires_approval": true,
+      "required_inputs": [
+        "emr_id (SIS patient_id)",
+        "note payload"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=4).",
+        "provider approval for any signed-note operation.",
+        "A verified note-write selector/wire contract."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No note-draft creation path in the vendored clients."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real note-write selectors/wire contract not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the note change; signed notes are addendum-only.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human + provider approval required (risk>=4).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No note-draft creation path in the vendored clients.",
+      "needed_from_user": [
+        "Real EMR note-write screen + HAR-derived wire contract",
+        "DOM selectors",
+        "provider sign-off workflow"
+      ]
+    },
+    {
+      "action_name": "update_unsigned_note",
+      "target_system": "sis",
+      "risk_level": 4,
+      "requires_approval": true,
+      "required_inputs": [
+        "emr_id (SIS patient_id)",
+        "note payload"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=4).",
+        "provider approval for any signed-note operation.",
+        "A verified note-write selector/wire contract."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No unsigned-note update path in the vendored clients (SIS note access is read-only)."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real note-write selectors/wire contract not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the note change; signed notes are addendum-only.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human + provider approval required (risk>=4).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No unsigned-note update path in the vendored clients (SIS note access is read-only).",
+      "needed_from_user": [
+        "Real EMR note-write screen + HAR-derived wire contract",
+        "DOM selectors",
+        "provider sign-off workflow"
+      ]
+    },
+    {
+      "action_name": "append_signed_note_addendum",
+      "target_system": "sis",
+      "risk_level": 4,
+      "requires_approval": true,
+      "required_inputs": [
+        "emr_id (SIS patient_id)",
+        "note payload"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=4).",
+        "provider approval for any signed-note operation.",
+        "A verified note-write selector/wire contract."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No addendum-append path in the vendored clients; signed notes must be addendum-only and provider-approved once a real path exists."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real note-write selectors/wire contract not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the note change; signed notes are addendum-only.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human + provider approval required (risk>=4).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No addendum-append path in the vendored clients; signed notes must be addendum-only and provider-approved once a real path exists.",
+      "needed_from_user": [
+        "Real EMR note-write screen + HAR-derived wire contract",
+        "DOM selectors",
+        "provider sign-off workflow"
+      ]
+    },
+    {
+      "action_name": "route_note_for_provider_review",
+      "target_system": "sis",
+      "risk_level": 4,
+      "requires_approval": true,
+      "required_inputs": [
+        "emr_id (SIS patient_id)",
+        "note payload"
+      ],
+      "preconditions": [
+        "Patient strong-matched.",
+        "approval token present (risk>=4).",
+        "provider approval for any signed-note operation.",
+        "A verified note-write selector/wire contract."
+      ],
+      "execution_steps": [
+        "BLOCKED \u2014 No provider-review routing path in the vendored clients."
+      ],
+      "selectors_needed": [
+        "UNKNOWN \u2014 real note-write selectors/wire contract not mapped."
+      ],
+      "patient_verification_rules": {
+        "strong_match": [
+          "emr_id (exact SIS patient_id or Svigg acct)",
+          "dob + exact first_name and last_name",
+          "dob + phone"
+        ],
+        "weak_match": [
+          "name only",
+          "phone only",
+          "email only"
+        ],
+        "on_weak_or_ambiguous": "HALT \u2014 do not act; enqueue human_review_queue (reason_code=weak_match or ambiguous_name) and return status=needs_human_review.",
+        "on_no_match": "return status=failed, patient_match.match_level=none; never guess."
+      },
+      "success_condition": "verified re-read confirms the note change; signed notes are addendum-only.",
+      "failure_modes": [
+        "not_implemented"
+      ],
+      "retry_behavior": "n/a",
+      "approval_requirements": "human + provider approval required (risk>=4).",
+      "post_action_verification": {
+        "mandatory": true,
+        "method": "re-read the EMR after the write and confirm the change is really present (date-guarded grid re-read / chart re-read).",
+        "screenshot_proof": "capture a post-action screenshot + Playwright trace of the verified end-state (evidence.py) and attach ids.",
+        "only_success_if": "the re-read positively confirms the change; otherwise return status=failed or needs_human_review \u2014 NEVER trust the POST response alone."
+      },
+      "output_schema": "bridge.models.BridgeResponse",
+      "audit_proof_required": true,
+      "implementation_status": "BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS",
+      "blocked_reason": "No provider-review routing path in the vendored clients.",
+      "needed_from_user": [
+        "Real EMR note-write screen + HAR-derived wire contract",
+        "DOM selectors",
+        "provider sign-off workflow"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://back-office.local/schemas/action_intent.schema.json",
+  "title": "ActionIntent",
+  "description": "Strict, parsed representation of a single staff request mapped onto exactly one Action-Registry action. Produced by the planning layer, reviewed by a human, and handed to the bridge. additionalProperties is false everywhere: an intent that does not fit this shape is rejected rather than guessed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action_name",
+    "target_system",
+    "risk_level",
+    "requires_approval",
+    "patient_identifiers",
+    "action_inputs",
+    "missing_fields",
+    "reason"
+  ],
+  "properties": {
+    "action_name": {
+      "type": "string",
+      "description": "Must match an action_name in actions.json.",
+      "enum": [
+        "find_patient",
+        "get_patient_demographics",
+        "get_upcoming_appointments",
+        "get_referral_status",
+        "get_documents",
+        "retrieve_notes",
+        "get_recent_activity",
+        "book_appointment",
+        "cancel_appointment",
+        "reschedule_appointment",
+        "confirm_appointment",
+        "mark_no_show",
+        "add_appointment_note",
+        "create_new_patient",
+        "update_patient_demographics",
+        "add_insurance_info",
+        "add_referring_provider",
+        "upload_patient_document",
+        "link_referral_to_patient",
+        "retrieve_note",
+        "create_note_draft",
+        "update_unsigned_note",
+        "append_signed_note_addendum",
+        "route_note_for_provider_review"
+      ]
+    },
+    "target_system": {
+      "type": "string",
+      "enum": ["sis", "svigg", "both", "unknown"]
+    },
+    "risk_level": {
+      "type": "integer",
+      "description": "1=read, 2=scheduling, 3=patient, 4=notes.",
+      "enum": [1, 2, 3, 4]
+    },
+    "requires_approval": {
+      "type": "boolean",
+      "description": "True for any write (risk_level >= 2)."
+    },
+    "patient_identifiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Identifiers the staff request supplied. Strong match requires emr_id, or dob + exact first_name + last_name, or dob + phone. Name/phone/email alone is a weak match and MUST halt for human review.",
+      "properties": {
+        "first_name": { "type": ["string", "null"] },
+        "last_name": { "type": ["string", "null"] },
+        "dob": {
+          "type": ["string", "null"],
+          "description": "ISO 8601 date (YYYY-MM-DD) or null.",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "phone": { "type": ["string", "null"] },
+        "email": {
+          "type": ["string", "null"],
+          "format": "email"
+        },
+        "emr_id": {
+          "type": ["string", "null"],
+          "description": "Exact SIS patient_id or Svigg acct."
+        }
+      }
+    },
+    "action_inputs": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Action-specific inputs (date, time, provider, cpt00, demographics, note payload, ...). Validated per-action by the bridge Pydantic models, not by this schema."
+    },
+    "missing_fields": {
+      "type": "array",
+      "description": "Required inputs the request did NOT supply. Non-empty means the intent is incomplete and cannot execute.",
+      "items": { "type": "string" }
+    },
+    "reason": {
+      "type": "string",
+      "description": "Short plain-language justification for this mapping (shown to the human approver)."
+    }
+  }
+}

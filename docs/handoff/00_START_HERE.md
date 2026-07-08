@@ -62,16 +62,27 @@ been yet).
 3. **`docs/handoff/roadmap.md`** — current build state and the very next
    feature to build (pre-op/post-op/follow-up/recall requests), as specified
    directly by the owner.
-4. **`docs/handoff/research/`** — two files of load-bearing engineering
-   findings from the real, live codebases (not background reading):
+4. **`docs/handoff/phase1-build-log.md`** — how the first build pass actually
+   went: a real schema mismatch caught between parallel agents, more bugs a
+   reconciliation agent found beyond the original diagnosis, an unsupervised
+   concurrent-edit collision caught by verifying disk state, and the
+   verification pattern (compile + real tests + typecheck at every commit,
+   never trust a completion report alone) worth repeating regardless of
+   whether Phase 1's code itself survives into 2.0.
+5. **`docs/handoff/research/`** — engineering findings from the real, live
+   codebases and one design discussion (not background reading):
    - `reliability-audit.md` — a real, confirmed gap: the live phone system
      can silently lose a call if the app is down when it ends, with zero
-     mechanism to notice. Also documents a good pattern worth copying
-     (the outbound-call compliance gate).
+     mechanism to notice. Also documents a good pattern worth reimplementing
+     fresh (the outbound-call compliance gate).
    - `atlantic-hub-fork.md` — a previous, unfinished attempt at almost this
      exact platform, found buried in a fork branch. What's real vs. what's
-     a disconnected local prototype, and what to salvage.
-5. **`.claude/skills/patient-card-completeness-engine/`** — the data model
+     a disconnected local prototype, and which patterns are worth rebuilding
+     (never the code itself).
+   - `design-principles.md` — what separates "AI slop" from a clean,
+     professional tool, prompted by a TriFetch screenshot. Read before web
+     work resumes.
+6. **`.claude/skills/patient-card-completeness-engine/`** — the data model
    for tracking per-patient completeness (identity, insurance, chart
    readiness, scheduling, pre-op/post-op/recalls, open work). This is the
    skill that governs the next feature.
@@ -92,10 +103,16 @@ been yet).
 - The owner has a **designated test patient** for all EMR write development —
   ask for its identifiers before building/testing any write action; never
   test writes against real patients.
-- The owner explicitly said: **treat all four legacy codebases
-  (`n8n-office`, `ai-phone-intake`, `antigravity`, `koko-intake`) as a
-  toolbox** — mine them for proven pieces, don't rebuild from scratch, but
-  the new platform's architecture is not bound to any of their structures.
+- **This is a full rewrite (2.0), not an assembly of old parts.** The four
+  legacy codebases (`n8n-office`, `ai-phone-intake`, `antigravity`,
+  `koko-intake`) are version 1.0 — reference material only. Tear each one
+  down to understand what actually works and what fails, the way you'd
+  strip a car to the frame before rebuilding it with modern parts. Nothing
+  gets copied, ported, or vendored in as-is — every piece gets built fresh
+  with better tools. (Note: `back-office/bridge/integrations/` currently
+  contains SIS/Svigg client code vendored in verbatim under the old framing,
+  before this rule was set — whether that gets rewritten too is an open
+  question for the owner, not yet decided either way.)
 
 ## Repos in scope
 

@@ -44,9 +44,12 @@ of inbound SMS is possible and nothing surfaces it to staff.
 API *accepts* the request — never reconciled against actual delivery status.
 Staff can see something as "handled" that never delivered.
 
-**Back Office requirement:** copy the fax pattern (independent scheduled poll)
-for every channel, not the SMS pattern. Escalate subscription-renewal failures
-past a log line — treat "external subscription broke N times" as page-worthy.
+**Back Office requirement:** build a new independent-scheduled-poll module
+for every channel — the fax module proves this approach works, but the
+Back Office implementation is new code against Postgres/Temporal, not the
+old `fax_sync_loop` reused. Do the same for SMS, which today only has the
+weaker webhook-reactive pattern. Escalate subscription-renewal failures past
+a log line — treat "external subscription broke N times" as page-worthy.
 Reconcile local "sent" status against the provider's real delivery record.
 
 ## Finding 3 — Inbox "handled" status is trusted local state, not verified truth

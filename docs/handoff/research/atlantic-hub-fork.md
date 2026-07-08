@@ -40,24 +40,32 @@ This is the same shape as the Back Office platform, arrived at independently.
 - Zero automated tests on any fork-added module.
 - No workflow engine, no durable execution, single-process SQLite.
 
-## What to actually salvage vs. discard
+## What's worth learning from vs. discarding entirely
 
-**Salvage (patterns, not code):**
+Nothing here gets copied in. This whole fork is 1.0 — read it to know what's
+already proven to work and what already failed, then build the equivalent
+fresh. Treat it the way you'd study a torn-down engine before machining new
+parts, not a bin of parts to bolt on.
+
+**Patterns proven to work (reimplement fresh — the files themselves are not
+the deliverable):**
 - The design spec's non-negotiables: verified-truth/provenance tagging,
   human-in-the-loop signature via initials, honest-on-writes (no fabricated
   success), `pre_check → execute → post-verify`.
-- The `approval_execute.py` gating pattern: master flag + allowlist +
-  honest "ready_gated" no-op when off. This is directly portable to the
-  Back Office Action Registry.
-- Concrete EMR-write facts learned the hard way: the `bk_p` booking field
-  names were never in a HAR and needed live discovery; the SIS→Svigg
-  schedule-source correction; the single-serialized-browser-session
-  constraint for SIS/Svigg probes (only one Playwright session can safely
-  drive either EMR at a time — matters for how the Bridge is architected).
+- The `approval_execute.py` gating shape: master flag + allowlist + honest
+  "ready_gated" no-op when off. Rebuild this exact shape as new code in the
+  Back Office Action Registry — don't import the file.
+- Concrete EMR-write facts learned the hard way, worth knowing before
+  rebuilding the bridge: the `bk_p` booking field names were never in a HAR
+  and needed live discovery; the SIS→Svigg schedule-source correction; the
+  single-serialized-browser-session constraint for SIS/Svigg probes (only
+  one Playwright session can safely drive either EMR at a time — matters for
+  how the new Bridge gets architected, even though it's built from scratch).
 
-**Discard:**
+**Discard entirely, including as reference:**
 - The actual `aiops.db` schema/data.
 - The hardcoded-path `emr_bridge.py` subprocess shim.
 - Its RingCentral poll-only lane as code (untested, never scheduled) — the
   *idea* (independent poll, not webhook-reactive) is right; see
-  `reliability-audit.md`. Rebuild it properly against Postgres/Temporal.
+  `reliability-audit.md`. Build a new implementation of that idea against
+  Postgres/Temporal — the old module isn't a starting point.

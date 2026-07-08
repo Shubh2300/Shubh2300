@@ -13,9 +13,9 @@ center that treats **head-injury and workers'-comp patients**.
   surgical center, includes a **Head Injury Institute**.
 - Heavy **workers' comp (WC)** caseload: claim numbers, adjusters, employers,
   attorney/LOP (letter of protection) tracking, carrier-specific rules.
-  Existing prior art: `antigravity`'s WC referral routing, `ai-phone-intake`'s
-  `wc_outreach.py` lifecycle classifier, the MDManage AR roster
-  (WC/NF/Major-Med/Lien billing categories, ~$5.36M book).
+  Proof this is solvable, studied not reused: `antigravity`'s WC referral
+  routing, `ai-phone-intake`'s `wc_outreach.py` lifecycle classifier, the
+  MDManage AR roster (WC/NF/Major-Med/Lien billing categories, ~$5.36M book).
   This is not a generic medical office — WC/head-injury cases have their own
   documents (WC Form, Head Injury Evaluation), their own stakeholders
   (adjusters, attorneys), and their own stalled-case failure modes.
@@ -24,14 +24,22 @@ center that treats **head-injury and workers'-comp patients**.
 
 ## Current state (all committed, `back-office/` monorepo)
 
-- **Foundation (Phase 1): done.** Postgres schema (20+ tables, hash-chained
-  append-only audit log), Action Registry (24 action contracts, 8 marked
-  `IMPLEMENTED_VENDORED`, 16 honestly `BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS`),
-  local EMR Bridge re-vendored from the real, production-tested SIS/Svigg
-  clients (not a stale copy — see commit history), FastAPI backend
-  (parser → registry validation → approval queue → Temporal handoff), a
-  Temporal worker enforcing the write-approval-token gate, Next.js dashboard
-  skeleton (not styled/finished — web work is paused, see below).
+- **Foundation (Phase 1): done, but built under the pre-2.0 "toolbox" framing.**
+  Postgres schema (20+ tables, hash-chained append-only audit log), Action
+  Registry (24 action contracts, 8 marked `IMPLEMENTED_VENDORED`, 16 honestly
+  `BLOCKED_PENDING_REAL_SELECTOR_OR_CREDENTIALS`), FastAPI backend (parser →
+  registry validation → approval queue → Temporal handoff), a Temporal
+  worker enforcing the write-approval-token gate, Next.js dashboard skeleton
+  (not styled/finished — web work is paused, see below).
+  **Open question, not yet decided:** `back-office/bridge/integrations/`
+  currently contains SIS/Svigg client code copied in verbatim from the real
+  production system (the `IMPLEMENTED_VENDORED` label names this directly).
+  Under the 2.0 "nothing gets copied over" rule, this bridge is a candidate
+  for a full rewrite too — using the vendored code only as a read-only
+  reference for the EMR wire protocol (HAR-derived selectors, form field
+  names, session handling), never copied. This is expensive to redo (the
+  original required live HAR captures against real EMRs) — get the owner's
+  explicit call before ripping it out, don't decide unilaterally.
 - **`update_patient_demographics` is deliberately blocked** — confirmed
   broken server-side in production (200 OK, correct fields, doesn't persist).
   Do not re-enable without new evidence.

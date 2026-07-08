@@ -3,7 +3,7 @@
 
 ## The one-paragraph summary
 
-You don't have "a rough copy." You have **three substantial, overlapping systems** built for the same clinic (Atlantic Pain & Wellness / Dr. Gupta), each solving a slice of the office-automation problem, each with real working integrations and real safety engineering. The job ahead is **not** to build from scratch — it is to pick a foundation, extract the best "puzzle pieces" from all three, kill the duplicates, and close specific known gaps. Roughly 60–70% of the "Verified EMR Action Bridge" spec already exists in working Python code.
+You don't have "a rough copy." You have **three substantial, overlapping systems** built for the same clinic (Atlantic Pain & Wellness / Dr. Gupta), each solving a slice of the office-automation problem, each with real working integrations and real safety engineering — call this version 1.0. The job ahead **is** a full rewrite: version 2.0, the final production build. These three systems are reference material — tear each one down to see what actually works and what breaks, the way you'd strip a car to the frame and rebuild it with modern parts — not a set of files to copy in. Roughly 60–70% of the "Verified EMR Action Bridge" spec's *behavior* is already proven out in working Python code; none of that code itself is the target — the proof that the behavior is achievable is the value.
 
 ---
 
@@ -45,20 +45,20 @@ The largest and most production-hardened system. FastAPI monolith (`app/main.py`
 
 ## Cross-cutting reality check
 
-**You own three of everything.** Three patient matchers, three approval flows, three audit logs, three RingCentral clients, three EMR-access patterns (Playwright-with-API, raw HTML scraping, Chrome-extension session capture), multiple LLM classifiers. The "puzzle pieces" plan requires picking ONE canonical piece per function and deprecating the rest.
+**You own three overlapping attempts at everything.** Three patient matchers, three approval flows, three audit logs, three RingCentral clients, three EMR-access patterns (Playwright-with-API, raw HTML scraping, Chrome-extension session capture), multiple LLM classifiers. None of them are the answer — each is evidence that a particular approach to a particular function *can* work. The 2.0 build picks ONE **pattern** per function and reimplements it fresh; it does not import, vendor, or copy any of these files.
 
-**Best-of-breed picks (initial recommendation):**
-| Function | Canonical piece | From |
+**Which pattern to reimplement, and where the proof-of-concept lives (read it, don't reuse it):**
+| Function | Pattern to rebuild fresh | Proven by |
 |---|---|---|
-| Approval/draft state machine | `outbound_drafts.py` (comms) + `app/approvals.py` (EMR writes) | ai-phone-intake / n8n-office |
-| Patient matching | `identity_graph.py` | ai-phone-intake |
-| Audit log | hash-chained `audit_log.py` | n8n-office |
-| SIS reads | `sis_client.py` | n8n-office |
-| Svigg reads/writes | `svigg_scraper.py` + merged `svigg_reliability_fix.py` | n8n-office |
-| Referral email intake | `intake_gs/Code.gs` v2 pipeline | antigravity |
-| Inbox triage | `request_triage.py` / `email_request_triage.py` (deterministic) + LLM classifiers | n8n-office / antigravity |
-| Records consent gate | `release_terms.py` | ai-phone-intake |
-| Voice | Vapi + `emma_brain.py` | ai-phone-intake |
+| Approval/draft state machine | Channel-agnostic draft → approve → send, single-use approval tokens | `outbound_drafts.py` (ai-phone-intake) + `app/approvals.py` (n8n-office) |
+| Patient matching | EMPI-lite: immutable mention store, weighted pairwise scoring, shadow-report loop to tune weights before trusting auto-link | `identity_graph.py` (ai-phone-intake) |
+| Audit log | Hash-chained, append-only, tamper-evident | `audit_log.py` (n8n-office) |
+| SIS reads | REST-through-authenticated-browser access pattern | `sis_client.py` (n8n-office) |
+| Svigg reads/writes | Browser RPA with fail-closed identity guard + encounter-id-keyed cancel path | `svigg_scraper.py` (n8n-office) |
+| Referral email intake | LLM classify → extract → dedupe-by-name+DOB → route | `intake_gs/Code.gs` v2 pipeline (antigravity) |
+| Inbox triage | Deterministic keyword pre-filter before any LLM call | `request_triage.py` / `email_request_triage.py` (n8n-office / antigravity) |
+| Records consent gate | Signed-release-only disclosure rule, logged override | `release_terms.py` (ai-phone-intake) |
+| Voice | Bounded-task agent + escalation-on-ambiguity | Vapi + `emma_brain.py` (ai-phone-intake) |
 
 **Spec vs reality — the big divergences:**
 1. The mega-prompt calls for **Next.js + NestJS + Postgres + Temporal + TypeScript Playwright bridge**. Everything working today is **Python + Playwright(Python) + SQLite + vanilla HTML**. A TS rewrite discards live-verified EMR code.

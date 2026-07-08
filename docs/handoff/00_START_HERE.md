@@ -51,6 +51,12 @@ been yet).
 
 ## Read in this order
 
+0. **`docs/handoff/original-spec/`** — the owner's two original founding
+   prompts, preserved verbatim: `verified-emr-action-bridge.md` (the
+   architecture spec: action contracts, EMR bridge design, DB tables) and
+   `north-star-vision.md` (the product vision: 10 modules, risk levels,
+   MVP scope). Read these for the actual original ask in full fidelity —
+   everything below is how it got interpreted and where it diverged.
 1. **`/PROJECT_OVERVIEW.md`** (repo root) — the full system map: three
    pre-existing codebases (`n8n-office`, `ai-phone-intake`, `antigravity`)
    analyzed in depth, what each one does, and the canonical "which piece do

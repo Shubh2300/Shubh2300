@@ -1,9 +1,53 @@
 # Start here
 
-You're picking up a session building a real, in-house automation platform for
-a surgical center — think "TriFetch, built ourselves." The owner is an intern
-at the clinic with limited CS background; guide decisions, don't just execute
+You're working on an in-house automation platform for a surgical center —
+similar to TriFetch, but built ourselves. The owner is an intern at the
+clinic with limited CS background; guide decisions, don't just execute
 requests blindly, and always check what already exists before building new.
+
+## The vision — read this before anything else
+
+This is meant to become an **all-knowing platform**: one unified store of
+patient data that cross-references every input — EMRs, email, RingCentral,
+faxes, documents — instead of a dashboard bolted onto disconnected systems.
+Anything repetitive in the back office (billing follow-up, insurance
+checks, etc.) should eventually be handled by an agent, not a person.
+
+**Target operating model:** agents work autonomously — investigating,
+gathering evidence, monitoring for problems — but only ONE human is in the
+loop, and their job is narrow: approve or deny the specific actions agents
+propose. Autonomous work (looking something up, checking for a gap,
+confirming a problem is real) does not need approval; only the resulting
+ACTION does.
+
+Worked example the owner gave: if a patient in the unified dashboard is
+missing an EOB (Explanation of Benefits), the agent should actively search
+for it across every connected source on its own — no approval needed just
+to look. Only once it has exhausted the search and is confident the EOB is
+genuinely missing does it escalate to the dashboard, in a clean,
+purpose-built card for that specific issue type (not a generic wall of
+text) — showing what's wrong, what was already checked, and a recommended
+action, with quick-action buttons to act immediately.
+
+**Zero tolerance for junk approval cards.** Named failure mode: an
+irrelevant message (the owner's example — a July 4th holiday email) must
+never generate an approval card. Anything not genuinely patient-related
+should be auto-classified as spam/trash/not-important and filtered out
+before it ever reaches a human, with high confidence, not a guess. This has
+to be both accurate (never silently drop something real) AND aggressive
+(never surface something fake) — a cluttered, unprofessional-looking system
+is a real failure here, not a cosmetic one.
+
+**Resources are not a constraint.** Google APIs are already available.
+Budget for tools, certifications, hardware, or software is effectively
+unlimited — if a design would be better with something not currently
+available, say so explicitly rather than silently scoping down to fit an
+assumed budget.
+
+**Design bar:** this must not read as "AI slop" — dense and honest, not
+decorative. See `PROJECT_OVERVIEW.md` and prior session discussion for the
+specific do/don't list (worth formalizing into its own doc if it hasn't
+been yet).
 
 ## Read in this order
 
